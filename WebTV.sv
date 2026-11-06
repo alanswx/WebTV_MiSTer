@@ -62,7 +62,7 @@ localparam CONF_STR = {
 	"-;",
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[1],Answer Disk Boot prompt,Yes,No;",
-	"O[2],Serial port,Debug console,Modem;",
+	"O[2],Serial port,Modem,Debug console;",
 	"O[3],Debug overlay,Off,On;",
 	"-;",
 	"J1,Select,Back,Home,Options,Scroll Up,Scroll Down,Power;",
@@ -205,7 +205,7 @@ webtv_mister #(.CLK1X_HZ(CLK1X_HZ), .CLK93_HZ(CLK93_HZ)) webtv
 	.ps2_key        (ps2_key),
 	.joy            (joystick_0[15:0]),
 
-	.uart_modem     (status[2]),
+	.uart_modem     (~status[2]),
 	.uart_rxd       (UART_RXD),
 	.uart_txd       (UART_TXD),
 	.uart_dsr       (UART_DSR),

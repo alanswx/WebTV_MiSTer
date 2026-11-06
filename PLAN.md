@@ -257,8 +257,18 @@ Hardware bring-up (2026-11-06, mister192, Quartus 17.0 Lite on misterubuntu):
   TellyScript). It stops at TellyScript's modem handshake ("Watchpup fired"): nothing answers on the modem
   UART. JS answers there with its Modem class (AT commands, TellyScript "NULL loader" download).
 
+- Modem + network (DONE, 2026-11-06): linux/webtv_modem.py on the MiSTer plays the Rockwell modem on
+  /dev/ttyS1 (port of modem.js: AT commands, TellyScript AT** download, DCD via HPS DTR) and relays the online
+  data to linux/lineserver.mjs (Node on misterubuntu: webtv-bridge PPP server + gateway + built-in service).
+  The debug console now also goes to a DDR3 ring (0x30FB0000, byte count at 0x30FC0000) so the UART is free;
+  "Serial port" defaults to Modem.
+  Result on mister192: TellyScript downloads the NULL loader, power (F1) -> "Connecting to WebTV" -> dial ->
+  PPP -> registration page -> typed name/username over the IR keyboard -> "All set" -> WebTV Emulator Home.
+  (The solid magenta screen seen earlier was the OS's crash screen after "Watchpup fired".)
+
 Next:
-- Modem side: answer TellyScript / AT commands (Linux-side bridge on the HPS UART, or a minimal responder).
+- Real Internet: run webtv-bridge tools/relay.mjs and start the line server with --relay.
+- Audio unit, OSD-reset reliability, analog video scanout.
 - CPU timing at 93.75 MHz (forwarding/stall paths) so the full-speed build can be used.
 - Quartus build (needs a machine with Quartus 17): fit/timing; expect work on the renderer's blend path and the
   CPU at 93.75 MHz (the N64 core's CPU met timing there).

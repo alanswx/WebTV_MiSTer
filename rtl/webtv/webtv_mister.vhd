@@ -170,6 +170,15 @@ architecture arch of webtv_mister is
    signal dumpIdx     : integer range 0 to 1025 := 0;
    signal dumpPh      : integer range 0 to 3 := 0;
    signal dumped      : std_logic := '0';
+   -- debug console log in DDR3 (window offset 0xFB0000, 64 KB ring of bytes; the running byte count
+   -- is written to 0xFC0000 after each byte): read from Linux via /dev/mem 0x30FB0000 / 0x30FC0000
+   type tLogQ is array(0 to 255) of std_logic_vector(7 downto 0);
+   signal logQ        : tLogQ;
+   signal logWr, logRd : unsigned(7 downto 0) := (others => '0');
+   signal logCount    : unsigned(31 downto 0) := (others => '0');
+   signal logPh       : std_logic := '0';
+   signal logByte     : std_logic_vector(7 downto 0) := (others => '0');
+   signal hpsMask     : std_logic_vector(7 downto 0) := x"FF";
    signal ledI        : std_logic_vector(31 downto 0);
    signal errI        : std_logic_vector(7 downto 0);
    signal vceI, hbI, vbI : std_logic;
@@ -440,6 +449,7 @@ begin
              (ioctl_wait = '1' or (boot = LOADING and ioctl_download = '0'))) then
             hpsAddr   <= wordAddr;
             hpsData   <= wordBuf;
+            hpsMask   <= x"FF";
             hpsReq    <= '1';
             hpsBusy   <= '1';
             wordValid <= '0';
@@ -466,6 +476,7 @@ begin
                else
                   hpsAddr   <= resize(clearAddr, 28);
                   hpsData   <= (others => '0');
+                  hpsMask   <= x"FF";
                   hpsReq    <= '1';
                   hpsBusy   <= '1';
                   clearAddr <= clearAddr + 8;
@@ -487,6 +498,37 @@ begin
             if (holdCnt = 0) then boot <= RUN; else holdCnt <= holdCnt - 1; end if;
          end if;
 
+         -- debug console log ring (the HPS client is idle while running)
+         if (dbg_tx = '1' and logWr + 1 /= logRd) then
+            logQ(to_integer(logWr)) <= dbg_tx_data;
+            logWr <= logWr + 1;
+         end if;
+         logByte <= logQ(to_integer(logRd));
+         if (boot = RUN and hpsBusy = '0' and hpsReq = '0' and not (trFrozen = '1' and dumped = '0')) then
+            if (logPh = '0' and logRd /= logWr) then
+               -- the byte (logByte = logQ(logRd), read last cycle) into its lane
+               hpsAddr  <= x"0FB0000" + resize(logCount(15 downto 3) & "000", 28);
+               hpsData  <= logByte & logByte & logByte & logByte & logByte & logByte & logByte & logByte;
+               hpsMask  <= (others => '0');
+               hpsMask(to_integer(logCount(2 downto 0))) <= '1';
+               hpsReq   <= '1';
+               hpsBusy  <= '1';
+               logPh    <= '1';
+               logRd    <= logRd + 1;
+               logCount <= logCount + 1;
+            elsif (logPh = '1') then
+               hpsAddr  <= x"0FC0000";
+               hpsData  <= x"00000000" & std_logic_vector(logCount);
+               hpsMask  <= x"FF";
+               hpsReq   <= '1';
+               hpsBusy  <= '1';
+               logPh    <= '0';
+            end if;
+         end if;
+         if (boot /= RUN and boot /= HOLD) then
+            if (boot = CLEAR) then logCount <= (others => '0'); logPh <= '0'; end if;
+         end if;
+
          -- branch trace dump (the HPS client is idle while running)
          if (boot = RUN and trFrozen = '1' and dumped = '0' and hpsBusy = '0' and hpsReq = '0') then
             if (dumpPh = 0) then
@@ -498,6 +540,7 @@ begin
                dumpPh  <= 0;
                hpsReq  <= '1';
                hpsBusy <= '1';
+               hpsMask <= x"FF";
                if (dumpIdx = 1024) then
                   hpsAddr <= x"0FA2000";
                   hpsData <= x"C0DEDEAD" & x"00000" & "00" & std_logic_vector(trWi);
@@ -577,7 +620,7 @@ begin
       vid_hblank => hbI, vid_vblank => vbI, vid_hsync => vid_hsync, vid_vsync => vid_vsync,
       vid_ce => vceI,
       hps_request => hpsReq, hps_rnw => '0', hps_address => hpsAddr, hps_burstcount => 10x"001",
-      hps_writeMask => x"FF", hps_dataWrite => hpsData, hps_done => hpsDone, hps_dataRead => open,
+      hps_writeMask => hpsMask, hps_dataWrite => hpsData, hps_done => hpsDone, hps_dataRead => open,
       ddr3_BUSY => ddr3_BUSY, ddr3_DOUT => ddr3_DOUT, ddr3_DOUT_READY => ddr3_DOUT_READY,
       ddr3_BURSTCNT => ddr3_BURSTCNT, ddr3_ADDR => ddr3_ADDR, ddr3_DIN => ddr3_DIN, ddr3_BE => ddr3_BE,
       ddr3_WE => ddr3_WE, ddr3_RD => ddr3_RD,
