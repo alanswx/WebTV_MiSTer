@@ -11,6 +11,14 @@ The core's hardware-modem UART (16550) is wired to the MiSTer's UART (/dev/ttyS1
 
       python3 webtv_modem.py --log --connect LINESERVER_HOST:2323
 
+  `webtv_modem.sh [HOST:PORT]` runs it under a supervisor that restarts it if it exits (log in
+  /tmp/modem.log; running it again replaces the running one). It isn't started at boot, since other
+  cores use the same UART.
+
+  The box drops DTR when it hangs up, powers off or reboots; the modem then hangs up and returns to
+  command mode. (Before this the modem stayed "online" to the old call, the box's next `AT**`
+  firmware download went down the line, and the box's watchdog fired: the purple screen.)
+
   Without `--connect`, dialing answers NO DIALTONE (the box shows "The phone line seems to be in use").
 
 * `lineserver.mjs` (Node, any machine on the LAN): answers each call with the webtv-bridge network
@@ -18,7 +26,13 @@ The core's hardware-modem UART (16550) is wired to the MiSTer's UART (/dev/ttyS1
 
       node lineserver.mjs --bridge /path/to/webtv-bridge [--port 2323] [--relay ws://host:8081]
 
-  `--relay` points at webtv-bridge's `tools/relay.mjs` for real Internet access (FrogFind etc.).
+  `--relay` points at webtv-bridge's `tools/relay.mjs` for the box's own Internet connections; web
+  pages the box requests through the service (http/https) are fetched by the line server itself
+  (`--no-web` turns that off). Registrations are kept in `~/.webtv-lineserver.json` (`--store`), so a
+  restart doesn't make the box register again.
+
+  `start_net.sh [BRIDGE_DIR]` starts (or restarts) the relay and the line server next to it, each
+  restarted if it exits (logs: relay.log, lineserver.log).
 
 Start the core with an MGL that loads it and mounts the disk image in one step, e.g.
 
@@ -28,3 +42,6 @@ Start the core with an MGL that loads it and mounts the disk image in one step, 
     </mistergamedescription>
 
 The boot ROM goes to games/WebTV/boot.rom. Power button: F1 on the keyboard (or the joystick's Power).
+
+Screens: black = the box is on standby, waiting for Power. Purple = the OS crashed (its watchdog
+fired); the debug log (`--log`) shows the registers and what it was doing. Reload the MGL to restart.

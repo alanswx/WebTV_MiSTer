@@ -6,10 +6,13 @@
 // relays the modem's online data both ways.
 //
 //   node linux/lineserver.mjs [--port 2323] [--bridge PATH_TO_webtv-bridge] [--relay ws://host:8081]
+//                             [--store FILE (default ~/.webtv-lineserver.json)] [--no-web]
 //
 // Web pages the box asks the service for (http/https) are fetched by this host (--no-web to disable).
 // Without --relay the line answers with the built-in service only (registration / home pages).
 import net from 'node:net';
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -20,6 +23,7 @@ const BR = opt('bridge', join(HERE, '../ext/webtv-bridge'));
 const PORT = Number(opt('port', '2323'));
 const RELAY = opt('relay', null);
 const VERBOSE = args.includes('--verbose');
+const STORE = opt('store', join(homedir(), '.webtv-lineserver.json'));
 
 const { createNetworkLine } = await import(join(BR, 'src/net/line.js'));
 const { WebTVService } = await import(join(BR, 'src/wtvsrv/service.js'));
@@ -38,8 +42,23 @@ async function fetchUrl(url, { method = 'GET', headers = {}, body } = {}) {
   return { status: `${r.status} ${r.statusText || 'OK'}`, headers: { 'content-type': r.headers.get('content-type') || 'text/html' }, body: out };
 }
 
+// accounts (registrations) kept in a JSON file, so restarting the server doesn't make the box
+// register again
+class FileStore {
+  constructor(path) {
+    this.path = path;
+    try { this.m = JSON.parse(readFileSync(path, 'utf8')); } catch { this.m = {}; }
+  }
+  async get(k) { return this.m[k] ?? null; }
+  async set(k, v) {
+    this.m[k] = v;
+    try { writeFileSync(this.path + '.tmp', JSON.stringify(this.m, null, 1)); renameSync(this.path + '.tmp', this.path); }
+    catch (e) { log(`store: ${e.message}`); }
+  }
+}
+
 // one service for all calls: registrations and sessions persist between calls
-const service = new WebTVService({ log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
+const service = new WebTVService({ store: new FileStore(STORE), log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
 
 net.createServer((sock) => {
   const who = `${sock.remoteAddress}:${sock.remotePort}`;
@@ -62,3 +81,6 @@ net.createServer((sock) => {
   sock.on('close', () => hang('socket closed'));
   sock.on('error', (e) => hang(e.message));
 }).listen(PORT, () => log(`WebTV line server on port ${PORT}${RELAY ? `, relay ${RELAY}` : ', built-in service only'}`));
+
+process.on('uncaughtException', (e) => log(`uncaught: ${e.stack || e}`));
+process.on('unhandledRejection', (e) => log(`unhandled rejection: ${e?.stack || e}`));

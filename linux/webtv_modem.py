@@ -10,6 +10,7 @@ webtv-bridge JS model does (src/machine/modem.js):
     firmware are accepted and discarded, with the same answers and quiet-time rules as the JS model
   * dialing: without a network line, ATD answers NO DIALTONE (as the JS model without a line);
     with --connect, ATD "connects" and bytes are relayed to a TCP endpoint (e.g. a PPP server)
+  * DTR: the box dropping DTR (power off, hangup, reboot) hangs up and returns to command mode (&D2)
   * carrier detect: the core takes DCD from the HPS DTR line (asserted while connected)
 
 The core's debug console is logged into DDR3; --log prints it (from /dev/mem 0x30FB0000).
@@ -31,6 +32,7 @@ class Modem:
         self.sock = None
         self.out = bytearray()
         self.reset()
+        self.dtr = self.box_dtr()
 
     # ---------------------------------------------------------------- state
     def reset(self):
@@ -65,6 +67,31 @@ class Modem:
 
     def log(self, s):
         print(f'[modem] {s}', flush=True)
+
+    def box_dtr(self):
+        # the box's DTR (UART MCR bit 0) reaches the HPS UART as DSR/DCD
+        try:
+            v = struct.unpack('I', fcntl.ioctl(self.fd, termios.TIOCMGET, struct.pack('I', 0)))[0]
+            return bool(v & termios.TIOCM_DSR)
+        except OSError:
+            return None
+
+    def check_dtr(self):
+        # &D2: the box dropping DTR hangs up and returns to command mode. The box drops it on every
+        # hangup and power-off, and on its own reboots; without this the modem stays online to the
+        # old call and the box's next AT** (firmware download) goes down the line instead.
+        d = self.box_dtr()
+        if d is None or d == self.dtr:
+            return
+        self.dtr = d
+        self.log(f'DTR {"up" if d else "down"}')
+        if not d:
+            if self.online or self.connected or self.sock or self.dial_at:
+                self.hangup('DTR down')
+            self.cmd = ''
+            self.download = 0
+            self.dl_end_at = self.dl_idle_at = None
+            self.out.clear()
 
     # ---------------------------------------------------------------- host -> modem
     def from_host(self, b):
@@ -219,6 +246,8 @@ class Modem:
             self.dialed = number
             self.dial_at, self.dial_result = now + 1.0, 'OK'
             return
+        if self.sock:                              # a call still up: drop it first
+            self.hangup()
         self.set_dcd(False)
         host, port = self.connect_to.rsplit(':', 1)
         try:
@@ -244,7 +273,7 @@ class Modem:
                 pass
             self.sock = None
         self.set_dcd(False)
-        if was and why:
+        if was and why and why != 'DTR down':
             self.result('NO CARRIER')
 
     # ---------------------------------------------------------------- modem -> host
@@ -356,6 +385,7 @@ def main():
                 pass
             except OSError:
                 m.hangup('remote error')
+        m.check_dtr()
         m.poll()
         # pace towards the box at ~line speed
         now = time.monotonic()
