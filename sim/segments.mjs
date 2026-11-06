@@ -1,0 +1,31 @@
+// Which address segments / CPU modes does the WebTV boot + OS use? (interpreter, hooks xlate)
+import { readFileSync, openSync, readSync, fstatSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const HERE = dirname(fileURLToPath(import.meta.url));
+const BR = join(HERE, '../ext/webtv-bridge');
+const { WebTV } = await import(join(BR, 'src/machine/webtv.js'));
+const { OverlayDisk } = await import(join(BR, 'src/machine/ide.js'));
+const { createNetworkLine } = await import(join(BR, 'src/net/line.js'));
+const { WebTVService } = await import(join(BR, 'src/wtvsrv/service.js'));
+const N = Number(process.argv[2] || 3000000000);
+const fd = openSync(join(BR, 'data/debug_webtv_w200_7.bin'), 'r');
+const disk = new OverlayDisk(fstatSync(fd).size, (lba, n) => { const b = new Uint8Array(n * 512); readSync(fd, b, 0, b.length, lba * 512); return b; });
+const q = () => {};
+const m = new WebTV({ rom: readFileSync(join(BR, 'data/flipped_merged_boot.bin')), disk, log: q });
+let line = '';
+m.solo.debugOut = (c) => { if (c === 10) line = ''; else line += String.fromCharCode(c); if (line.endsWith('Disk Boot?')) m.solo.debugInput(121); };
+m.modemLine.line = createNetworkLine({ relayUrl: null, service: new WebTVService({ log: q }), hostMap: {}, log: q });
+m.sched.at('power', 1600000000, () => m.ir.pressButton('power'));
+const cpu = m.cpu;
+const seg = (va) => ['kuseg', 'kuseg', 'kuseg', 'kuseg', 'kseg0', 'kseg1', 'kseg2', 'kseg3'][(va >>> 29) & 7];
+const counts = new Map();
+const add = (k) => counts.set(k, (counts.get(k) || 0) + 1);
+const mode = () => { const sr = cpu.cp0[12]; return ((sr & 0x18) && !(sr & 6)) ? 'user' : 'kernel'; };
+const ox = cpu.xlate.bind(cpu), oxi = cpu.xlateI.bind(cpu);
+cpu.xlate = (va, st) => { add(`data ${mode()} ${seg(va)}`); return ox(va, st); };
+cpu.xlateI = (va) => { add(`fetch ${mode()} ${seg(va)}`); return oxi(va); };
+cpu.useJit = false;
+// rd32/wr32 fast paths still call xlate; fetch calls xlateI
+for (let done = 0; done < N; done += 50000000) m.run(50000000);
+for (const [k, v] of [...counts].sort()) console.log(k.padEnd(24), v);

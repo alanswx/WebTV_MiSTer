@@ -1,0 +1,4 @@
+set_global_assignment -name QIP_FILE rtl/pll.qip
+set_global_assignment -name QIP_FILE rtl/webtv.qip
+set_global_assignment -name SYSTEMVERILOG_FILE WebTV.sv
+set_global_assignment -name SDC_FILE WebTV.sdc
