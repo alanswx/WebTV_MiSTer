@@ -60,6 +60,14 @@ class FileStore {
 // one service for all calls: registrations and sessions persist between calls
 const service = new WebTVService({ store: new FileStore(STORE), log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
 
+// every request and its status line in the log (the service's own log is --verbose)
+const handle = service.handle.bind(service);
+service.handle = async (req, conn) => {
+  const r = await handle(req, conn);
+  log(`wtvp ${req.method} ${JSON.stringify(req.url)} -> ${String(r.head).split('\n')[0]}`);
+  return r;
+};
+
 net.createServer((sock) => {
   const who = `${sock.remoteAddress}:${sock.remotePort}`;
   log(`call from ${who}`);

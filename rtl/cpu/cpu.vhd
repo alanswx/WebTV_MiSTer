@@ -561,6 +561,18 @@ architecture arch of cpu is
    
    signal TLB_ss_load                  : std_logic;
    signal TLB_instrMapped              : std_logic;
+   signal TLB_instrMapped1             : std_logic;   -- WebTV: per fetch path
+   signal TLB_instrMapped2             : std_logic;
+
+   -- WebTV: is an instruction fetch at addr translated (the old TLB_instrMapped expression)
+   function instrMapped(addr : unsigned(63 downto 0); bit64 : std_logic; pmode : unsigned(1 downto 0)) return std_logic is
+   begin
+      if (bit64 = '1' and addr(63 downto 60) < 8) then return '1'; end if;
+      -- R4640 kernel mode never maps (no TLB)
+      if (bit64 = '0' and pmode = "01" and (addr(31 downto 29) < 4 or addr(31 downto 29) = 6)) then return '1'; end if;
+      if (bit64 = '0' and pmode = "10" and (addr(31 downto 29) < 4)) then return '1'; end if;
+      return '0';
+   end function;
    signal TLB_instrReq                 : std_logic;
    signal TLB_instrUseCache            : std_logic;
    signal TLB_instrStall               : std_logic;
@@ -1098,15 +1110,16 @@ begin
    
    FetchAddr <= FetchAddr2 when (FetchAddrSelect = '1') else FetchAddr1;
    
-   FetchAddrTLBMuxed1 <= TLB_instrAddrOutFound when (TLB_instrMapped = '1') else FetchAddr1(31 downto 0);
-   FetchAddrTLBMuxed2 <= TLB_instrAddrOutFound when (TLB_instrMapped = '1') else FetchAddr2(31 downto 0);
+   -- WebTV: each fetch path's tag compare uses its own "mapped" decision. With one decision made
+   -- from the selected FetchAddr, the branch compare (FetchAddrSelect) ran in series with both tag
+   -- compares into stall1 -- the CPU clock's critical path. Now the branch only picks the hit.
+   FetchAddrTLBMuxed1 <= TLB_instrAddrOutFound when (TLB_instrMapped1 = '1') else FetchAddr1(31 downto 0);
+   FetchAddrTLBMuxed2 <= TLB_instrAddrOutFound when (TLB_instrMapped2 = '1') else FetchAddr2(31 downto 0);
 
    -- running from 64 bit sections currently not fully supported to not screw up FPGA route timing
-   TLB_instrMapped <= '1' when (bit64region = '1' and FetchAddr(63 downto 60) < 8) else
-                      -- WebTV: R4640 kernel mode never maps (no TLB)
-                      '1' when (bit64region = '0' and privilegeMode = "01" and (FetchAddr(31 downto 29) < 4 or FetchAddr(31 downto 29) = 6)) else
-                      '1' when (bit64region = '0' and privilegeMode = "10" and (FetchAddr(31 downto 29) < 4)) else
-                      '0';
+   TLB_instrMapped1 <= instrMapped(FetchAddr1, bit64region, privilegeMode);
+   TLB_instrMapped2 <= instrMapped(FetchAddr2, bit64region, privilegeMode);
+   TLB_instrMapped  <= TLB_instrMapped2 when (FetchAddrSelect = '1') else TLB_instrMapped1;
                       
    TLB_instrReq <= '1' when (TLB_instrMapped = '1' and (stall = 0 or TLB_ss_load = '1')) else '0';
    

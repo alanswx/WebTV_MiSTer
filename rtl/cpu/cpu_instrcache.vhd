@@ -83,6 +83,18 @@ architecture arch of cpu_instrcache is
    signal state : tstate := IDLE;
    
    signal fill_latched : std_logic := '0';
+
+   -- WebTV: a CACHE command that arrives while the cache is busy (FILL, CLEARCACHE) was dropped:
+   -- it is a one-clock pulse, only looked at in IDLE, and nothing stalls the pipeline for it. A
+   -- flush loop's own fetches start fills, so part of every I-cache flush was lost and stale code
+   -- could run after the OS loads code. Hold it (one deep) and retire it in IDLE. Same fix as
+   -- SGIIndy_MiSTer's cpu_instrcache.vhd.
+   signal cmd_pending  : std_logic := '0';
+   signal cmd_code     : unsigned(4 downto 0) := (others => '0');
+   signal cmd_addr     : unsigned(31 downto 0) := (others => '0');
+   signal cmd_code_eff : unsigned(4 downto 0);
+   signal cmd_addr_eff : unsigned(31 downto 0);
+   signal cmd_ena_eff  : std_logic;
    
 begin 
 
@@ -128,6 +140,11 @@ begin
    
    tag_address_b2 <= std_logic_vector(read_addr2(12 downto 5));
    read_hit2      <= '1' when (unsigned(tag_q_b2(19 downto 0)) = read_addrCompare2(31 downto 12) and tag_q_b2(20) = '1') else '0';
+
+   -- WebTV: a command held while busy (cmd_pending) is retired in IDLE
+   cmd_ena_eff  <= CacheCommandEna or cmd_pending;
+   cmd_code_eff <= CacheCommand     when (CacheCommandEna = '1') else cmd_code;
+   cmd_addr_eff <= CacheCommandAddr when (CacheCommandEna = '1') else cmd_addr;
 
    --------- data
    
@@ -203,7 +220,14 @@ begin
             fill_latched <= '1';
          end if;
 
+         if (CacheCommandEna = '1' and state /= IDLE) then   -- WebTV: hold it, see cmd_pending
+            cmd_pending <= '1';
+            cmd_code    <= CacheCommand;
+            cmd_addr    <= CacheCommandAddr;
+         end if;
+
          if (SS_reset = '1') then
+            cmd_pending    <= '0';
             state          <= CLEARCACHE;
             tag_data_a     <= (others => '0');
             tag_address_a  <= (others => '0');
@@ -215,16 +239,20 @@ begin
             
                when IDLE =>
                   fill_addrTag_sav <= fill_addrTag(12 downto 0);
-                  if (CacheCommandEna = '1' and (CacheCommand = 5x"00" or CacheCommand = 5x"10" or CacheCommand = 5x"14")) then -- WebTV: 14 = Fill I
+                  if (cmd_ena_eff = '1' and (cmd_code_eff = 5x"00" or cmd_code_eff = 5x"10" or cmd_code_eff = 5x"14")) then -- WebTV: 14 = Fill I
                      -- HACK!
                      -- todo: should only clear if tag matches
                      tag_wren_a     <= '1';
                      tag_data_a     <= (others => '0');
-                     tag_address_a  <= std_logic_vector(CacheCommandAddr(12 downto 5));
-                  elsif (CacheCommandEna = '1' and CacheCommand = 5x"08") then
+                     tag_address_a  <= std_logic_vector(cmd_addr_eff(12 downto 5));
+                     cmd_pending    <= '0';
+                  elsif (cmd_ena_eff = '1' and cmd_code_eff = 5x"08") then
                      tag_wren_a     <= '1';
                      tag_data_a     <= TagLo_Valid & std_logic_vector(TagLo_Addr(19 downto 0));
-                     tag_address_a  <= std_logic_vector(CacheCommandAddr(12 downto 5));
+                     tag_address_a  <= std_logic_vector(cmd_addr_eff(12 downto 5));
+                     cmd_pending    <= '0';
+                  elsif (cmd_ena_eff = '1') then
+                     cmd_pending    <= '0';   -- WebTV: a code this cache ignores
                   elsif (fill_request = '1' or fill_latched = '1') then
                      state          <= FILL;
                      ram_request    <= '1';

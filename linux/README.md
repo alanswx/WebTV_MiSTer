@@ -1,5 +1,8 @@
 # Linux side (MiSTer HPS) for the WebTV core
 
+Installing and running all of this: [DEPLOY.md](DEPLOY.md), which also covers moving the line
+server onto the MiSTer.
+
 The core's hardware-modem UART (16550) is wired to the MiSTer's UART (/dev/ttyS1) when the OSD
 "Serial port" is "Modem" (the default). Two small programs give the box a modem and a network:
 
@@ -11,9 +14,11 @@ The core's hardware-modem UART (16550) is wired to the MiSTer's UART (/dev/ttyS1
 
       python3 webtv_modem.py --log --connect LINESERVER_HOST:2323
 
-  `webtv_modem.sh [HOST:PORT]` runs it under a supervisor that restarts it if it exits (log in
-  /tmp/modem.log; running it again replaces the running one). It isn't started at boot, since other
-  cores use the same UART.
+  `webtv_modem.sh start|stop|restart|status|log` runs it as a service: restarted if it exits,
+  settings from `webtv.cfg` next to it (`connect=HOST:PORT`, `log=1`), log in /tmp/webtv_modem.log
+  (kept under 4 MB). With `--core WebTV` it only opens the UART while the WebTV core is loaded, so
+  it can start at boot without taking the serial port from other cores. `install_mister.sh` sets it
+  up; see [DEPLOY.md](DEPLOY.md).
 
   The box drops DTR when it hangs up, powers off or reboots; the modem then hangs up and returns to
   command mode. (Before this the modem stayed "online" to the old call, the box's next `AT**`

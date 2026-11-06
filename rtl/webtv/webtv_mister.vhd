@@ -183,6 +183,8 @@ architecture arch of webtv_mister is
    signal errI        : std_logic_vector(7 downto 0);
    signal vceI, hbI, vbI : std_logic;
    signal ovX, ovY    : integer range 0 to 1023 := 0;
+   signal ovCY        : integer range 0 to 19 := 0;     -- line within the overlay row (no divider)
+   signal ovR         : integer range 0 to 31 := 0;     -- overlay row
    signal hb1         : std_logic := '0';
    signal txCount, frCount, sdCount : unsigned(15 downto 0) := (others => '0');
    signal sdRdSeen, sdAckSeen, imgSeen, srstSeen : std_logic := '0';
@@ -388,11 +390,21 @@ begin
             if (hbI = '1') then ovX <= 0; elsif (ovX < 1023) then ovX <= ovX + 1; end if;
             if (hbI = '1' and hb1 = '0') then
                if (vbI = '1') then ovY <= 0; elsif (ovY < 1023) then ovY <= ovY + 1; end if;
+               if (vbI = '1' or ovY < 39) then
+                  ovCY <= 0; ovR <= 0;
+               elsif (ovY >= 40) then
+                  if (ovCY = 19) then
+                     ovCY <= 0;
+                     if (ovR < 31) then ovR <= ovR + 1; end if;
+                  else
+                     ovCY <= ovCY + 1;
+                  end if;
+               end if;
             end if;
             vga_r <= x"00"; vga_g <= x"00"; vga_b <= x"00";
             if (debug_overlay = '1' and ovY >= 40 and ovY < 40 + 20 * 20 and ovX >= 64 and ovX < 64 + 16 * 32) then
-               r := (ovY - 40) / 20; b := (ovX - 64) / 32; bit := 15 - b;
-               if ((ovY - 40) mod 20 >= 3 and (ovX - 64) mod 32 >= 3) then
+               r := ovR; b := to_integer(to_unsigned(ovX, 10)(9 downto 5)) - 2; bit := 15 - b;
+               if (ovCY >= 3 and to_unsigned(ovX, 10)(4 downto 0) >= 3) then
                   if (ovRows(r)(bit) = '1') then
                      vga_r <= x"F0"; vga_g <= x"F0"; vga_b <= x"F0";
                   elsif (r = 0) then

@@ -16,12 +16,39 @@ webtv-bridge JS model does (src/machine/modem.js):
 The core's debug console is logged into DDR3; --log prints it (from /dev/mem 0x30FB0000).
 
 usage: webtv_modem.py [--tty /dev/ttyS1] [--connect host:port] [--log] [--trace]
+                      [--config FILE] [--core WebTV] [--logfile FILE]
+
+--core WebTV only opens the UART while that core is loaded (/tmp/CORENAME), so the daemon can run
+all the time without taking the serial port from other cores.
 """
 import argparse, mmap, os, select, socket, struct, sys, termios, time, fcntl
 
 CR, LF = 13, 10
 DL_QUIET_S = 0.05
 RATE = 11520          # bytes/s towards the box
+
+
+class Output:
+    """stdout, or a log file kept under a size limit (one old copy, FILE.1)."""
+    def __init__(self, path=None, limit=4 << 20):
+        self.path, self.limit, self.f = path, limit, None
+        if path:
+            self.f = open(path, 'a', encoding='latin-1')
+
+    def write(self, text):
+        if not self.f:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return
+        self.f.write(text)
+        self.f.flush()
+        if self.f.tell() > self.limit:
+            self.f.close()
+            os.replace(self.path, self.path + '.1')
+            self.f = open(self.path, 'a', encoding='latin-1')
+
+
+OUT = Output()
 
 
 class Modem:
@@ -66,7 +93,7 @@ class Modem:
             pass
 
     def log(self, s):
-        print(f'[modem] {s}', flush=True)
+        OUT.write(f'[modem] {s}\n')
 
     def box_dtr(self):
         # the box's DTR (UART MCR bit 0) reaches the HPS UART as DSR/DCD
@@ -96,7 +123,7 @@ class Modem:
     # ---------------------------------------------------------------- host -> modem
     def from_host(self, b):
         if self.trace:
-            print(f'> {b:02x} {chr(b) if 32 <= b < 127 else ""}', flush=True)
+            OUT.write(f'> {b:02x} {chr(b) if 32 <= b < 127 else ""}\n')
         if self.online:
             self.last_tx = time.monotonic()
             if b == self.sregs[2]:
@@ -348,57 +375,119 @@ class DebugLog:
             for k in range(self.seen, n):
                 out.append(self.ring[k & 0xFFFF])
             self.seen = n
-            sys.stdout.write(out.replace(b'\r', b'').decode('latin-1'))
-            sys.stdout.flush()
+            OUT.write(out.replace(b'\r', b'').decode('latin-1'))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--tty', default='/dev/ttyS1')
-    ap.add_argument('--connect', help='host:port to relay the online data to (e.g. a PPP server)')
-    ap.add_argument('--log', action='store_true', help='print the core debug console')
-    ap.add_argument('--trace', action='store_true', help='print every byte from the box')
-    args = ap.parse_args()
+def read_config(path):
+    """KEY=VALUE lines (# comments): connect, tty, log, trace."""
+    cfg = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.split('#', 1)[0].strip()
+                if '=' in line:
+                    k, v = line.split('=', 1)
+                    cfg[k.strip().lower()] = v.strip()
+    except OSError:
+        pass
+    return cfg
+
+
+def core_name():
+    try:
+        with open('/tmp/CORENAME') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+def run(args, active):
+    """One session on the UART, until active() turns false."""
     fd = open_tty(args.tty)
     m = Modem(fd, args.connect, args.trace)
     dbg = DebugLog() if args.log else None
     m.log(f'on {args.tty}' + (f', line {args.connect}' if args.connect else ', no line (NO DIALTONE)'))
     next_out = time.monotonic()
+    next_check = 0.0
+    try:
+        while True:
+            now = time.monotonic()
+            if now >= next_check:
+                next_check = now + 0.5
+                if not active():
+                    m.log('core unloaded: releasing the UART')
+                    return
+            rl = [fd] + ([m.sock] if m.sock else [])
+            r, _, _ = select.select(rl, [], [], 0.005)
+            if fd in r:
+                try:
+                    data = os.read(fd, 4096)
+                except BlockingIOError:
+                    data = b''
+                for b in data:
+                    m.from_host(b)
+            if m.sock and m.sock in r:
+                try:
+                    data = m.sock.recv(4096)
+                    if not data:
+                        m.hangup('remote')
+                    elif m.online:
+                        m.out += data
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    m.hangup('remote error')
+            m.check_dtr()
+            m.poll()
+            # pace towards the box at ~line speed
+            now = time.monotonic()
+            if m.out and now >= next_out:
+                n = max(1, min(len(m.out), int((now - next_out) * RATE) + 1, 64))
+                try:
+                    w = os.write(fd, bytes(m.out[:n]))
+                    del m.out[:w]
+                except BlockingIOError:
+                    pass
+                next_out = now + n / RATE
+            if dbg:
+                dbg.poll()
+    finally:
+        m.hangup()
+        os.close(fd)
+
+
+def main():
+    global OUT
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--config', help='KEY=VALUE file (connect=HOST:PORT, log=1, ...); arguments override it')
+    ap.add_argument('--tty')
+    ap.add_argument('--connect', help='host:port to relay the online data to (e.g. a PPP server)')
+    ap.add_argument('--log', action='store_true', default=None, help='print the core debug console')
+    ap.add_argument('--trace', action='store_true', default=None, help='print every byte from the box')
+    ap.add_argument('--core', help='run only while this core is loaded (/tmp/CORENAME), e.g. WebTV')
+    ap.add_argument('--logfile', help='write to this file (kept under 4 MB, one old copy) instead of stdout')
+    args = ap.parse_args()
+    cfg = read_config(args.config) if args.config else {}
+    yes = lambda v: str(v).lower() in ('1', 'yes', 'true', 'on')
+    args.tty = args.tty or cfg.get('tty', '/dev/ttyS1')
+    args.connect = args.connect or cfg.get('connect') or None
+    args.log = args.log if args.log is not None else yes(cfg.get('log', '0'))
+    args.trace = args.trace if args.trace is not None else yes(cfg.get('trace', '0'))
+    if args.logfile:
+        OUT = Output(args.logfile)
+    if not args.core:
+        run(args, lambda: True)
+        return
+    active = lambda: core_name() == args.core
     while True:
-        rl = [fd] + ([m.sock] if m.sock else [])
-        r, _, _ = select.select(rl, [], [], 0.005)
-        if fd in r:
-            try:
-                data = os.read(fd, 4096)
-            except BlockingIOError:
-                data = b''
-            for b in data:
-                m.from_host(b)
-        if m.sock and m.sock in r:
-            try:
-                data = m.sock.recv(4096)
-                if not data:
-                    m.hangup('remote')
-                elif m.online:
-                    m.out += data
-            except BlockingIOError:
-                pass
-            except OSError:
-                m.hangup('remote error')
-        m.check_dtr()
-        m.poll()
-        # pace towards the box at ~line speed
-        now = time.monotonic()
-        if m.out and now >= next_out:
-            n = max(1, min(len(m.out), int((now - next_out) * RATE) + 1, 64))
-            try:
-                w = os.write(fd, bytes(m.out[:n]))
-                del m.out[:w]
-            except BlockingIOError:
-                pass
-            next_out = now + n / RATE
-        if dbg:
-            dbg.poll()
+        while not active():
+            time.sleep(1)
+        time.sleep(1)                      # let the core come up
+        try:
+            run(args, active)
+        except OSError as e:
+            OUT.write(f'[modem] {e}; retrying\n')
+            time.sleep(2)
 
 
 if __name__ == '__main__':
