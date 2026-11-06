@@ -564,13 +564,14 @@ architecture arch of cpu is
    signal TLB_instrMapped1             : std_logic;   -- WebTV: per fetch path
    signal TLB_instrMapped2             : std_logic;
 
-   -- WebTV: is an instruction fetch at addr translated (the old TLB_instrMapped expression)
+   -- WebTV: is an instruction fetch at addr translated. The R4640 has no TLB: kernel mode never
+   -- maps, and user/supervisor mode uses IBase/IBound (not implemented; the OS never leaves kernel
+   -- mode -- see PLAN.md). The N64 TLB path is not R4640 behaviour, and its mini-TLB hit test sat
+   -- on the CPU clock's critical path (branch compare -> FetchAddrSelect -> mini_hit -> stall1),
+   -- so fetches are never mapped. (The old expression, for an N64-style TLB: 64-bit regions with
+   -- addr(63:60) < 8; supervisor kuseg/sseg; user kuseg.)
    function instrMapped(addr : unsigned(63 downto 0); bit64 : std_logic; pmode : unsigned(1 downto 0)) return std_logic is
    begin
-      if (bit64 = '1' and addr(63 downto 60) < 8) then return '1'; end if;
-      -- R4640 kernel mode never maps (no TLB)
-      if (bit64 = '0' and pmode = "01" and (addr(31 downto 29) < 4 or addr(31 downto 29) = 6)) then return '1'; end if;
-      if (bit64 = '0' and pmode = "10" and (addr(31 downto 29) < 4)) then return '1'; end if;
       return '0';
    end function;
    signal TLB_instrReq                 : std_logic;

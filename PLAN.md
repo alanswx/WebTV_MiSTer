@@ -270,6 +270,19 @@ Open (seen 2026-11-06): after registration + a few more key presses the box stop
 no new debug output, screen not updating after an alert "-65" from wtv-setup:/get). Suspect the IR
 receiver's interrupt handshake (waitRead / run FIFO) under real-time key bursts; add IR state to the overlay.
 
+Robustness + CPU (2026-11-06, later):
+- Purple screens after power-off: the box drops DTR on hangup/power-off/reboot; the modem now hangs up on it
+  (&D2). Before, it stayed online to the old call, the next AT** download went down the line, watchdog fired.
+- Modem service (linux/webtv_modem.sh): restart loop, follows /tmp/CORENAME, config file, rotating log;
+  linux/install_mister.sh; lineserver: persistent registrations, web fetch, request log. linux/DEPLOY.md has
+  the plan for moving the line server onto the MiSTer (Python port / C / Node).
+- From SGIIndy_MiSTer (same N64-derived CPU, via Killer Instinct's R4600): I-cache CACHE commands arriving
+  during a fill were dropped (part of every flush lost -> stale code); now held and retired in IDLE.
+- Timing at 93.75 MHz, all paths ended in stall1 / EntryHi: per-path fetch mapping, then fetches never mapped
+  (R4640: no TLB; the N64 mini-TLB hit test was on branch -> stall1), exceptions write only BadVAddr (not
+  EntryHi/Context/XContext). Overlay divider and the trace dump's clock crossing fixed for 62.5 MHz.
+  -1.662 -> -1.121 ns after the first change; lock-step sweep passes after each.
+
 Next:
 - Real Internet: relay.mjs + lineserver --relay are running on misterubuntu; not yet exercised (input hang).
 - Audio unit, OSD-reset reliability, analog video scanout.

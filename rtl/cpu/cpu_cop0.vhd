@@ -910,14 +910,9 @@ begin
 
             if (excAddrWE = '1') then
                COP0_8_BADVIRTUALADDRESS       <= excAddr;
-               
-               COP0_10_ENTRYHI_virtualAddress <= excAddr(39 downto 13);
-               COP0_10_ENTRYHI_region         <= excAddr(63 downto 62);
-               
-               COP0_4_CONTEXT_BADVPN          <= excAddr(31 downto 13);
-               
-               COP0_20_XCONTEXT_Region        <= excAddr(63 downto 62);
-               COP0_20_XCONTEXT_BadVPN        <= excAddr(39 downto 13);
+               -- WebTV: only BadVAddr. EntryHi, Context and XContext are TLB registers the R4640
+               -- doesn't have (the JS model sets only BadVAddr), and the EntryHi load was on the
+               -- CPU clock's critical path (trap compare -> exceptionNew3 -> EntryHi).
             end if;
             
             -- tlb

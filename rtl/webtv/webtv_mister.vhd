@@ -166,6 +166,8 @@ architecture arch of webtv_mister is
    signal trFrozen    : std_logic;
    signal trWi        : unsigned(9 downto 0);
    signal trRA        : unsigned(9 downto 0) := (others => '0');
+   signal trWi1x      : unsigned(9 downto 0) := (others => '0');  -- trWi (CPU clock) registered in clk1x
+   signal trFr1, trFr2 : std_logic := '0';                         -- trFrozen, two clk1x later
    signal trQ         : std_logic_vector(63 downto 0);
    signal dumpIdx     : integer range 0 to 1025 := 0;
    signal dumpPh      : integer range 0 to 3 := 0;
@@ -516,7 +518,7 @@ begin
             logWr <= logWr + 1;
          end if;
          logByte <= logQ(to_integer(logRd));
-         if (boot = RUN and hpsBusy = '0' and hpsReq = '0' and not (trFrozen = '1' and dumped = '0')) then
+         if (boot = RUN and hpsBusy = '0' and hpsReq = '0' and not (trFr2 = '1' and dumped = '0')) then
             if (logPh = '0' and logRd /= logWr) then
                -- the byte (logByte = logQ(logRd), read last cycle) into its lane
                hpsAddr  <= x"0FB0000" + resize(logCount(15 downto 3) & "000", 28);
@@ -541,10 +543,13 @@ begin
             if (boot = CLEAR) then logCount <= (others => '0'); logPh <= '0'; end if;
          end if;
 
-         -- branch trace dump (the HPS client is idle while running)
-         if (boot = RUN and trFrozen = '1' and dumped = '0' and hpsBusy = '0' and hpsReq = '0') then
+         -- branch trace dump (the HPS client is idle while running). trWi is the CPU clock's: it is
+         -- static once the trace is frozen, so read it through a clk1x register (the adder on the
+         -- crossing was the 62.5 MHz critical path)
+         trWi1x <= trWi; trFr1 <= trFrozen; trFr2 <= trFr1;
+         if (boot = RUN and trFr2 = '1' and dumped = '0' and hpsBusy = '0' and hpsReq = '0') then
             if (dumpPh = 0) then
-               trRA   <= trWi + to_unsigned(dumpIdx mod 1024, 10);
+               trRA   <= trWi1x + to_unsigned(dumpIdx mod 1024, 10);
                dumpPh <= 1;
             elsif (dumpPh < 3) then
                dumpPh <= dumpPh + 1;                  -- trQ valid after the registered read
@@ -555,7 +560,7 @@ begin
                hpsMask <= x"FF";
                if (dumpIdx = 1024) then
                   hpsAddr <= x"0FA2000";
-                  hpsData <= x"C0DEDEAD" & x"00000" & "00" & std_logic_vector(trWi);
+                  hpsData <= x"C0DEDEAD" & x"00000" & "00" & std_logic_vector(trWi1x);
                   dumped  <= '1';
                else
                   hpsAddr <= x"0FA0000" + to_unsigned(dumpIdx * 8, 28);
