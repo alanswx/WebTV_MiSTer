@@ -7,6 +7,7 @@
 //
 //   node linux/lineserver.mjs [--port 2323] [--bridge PATH_TO_webtv-bridge] [--relay ws://host:8081]
 //
+// Web pages the box asks the service for (http/https) are fetched by this host (--no-web to disable).
 // Without --relay the line answers with the built-in service only (registration / home pages).
 import net from 'node:net';
 import { join, dirname } from 'node:path';
@@ -27,8 +28,18 @@ const ts = () => new Date().toISOString().slice(11, 23);
 const log = (...a) => console.log(ts(), ...a);
 const quiet = VERBOSE ? log : () => {};
 
+// web pages (http/https proxied by the service): fetched by this host, unless --no-web
+async function fetchUrl(url, { method = 'GET', headers = {}, body } = {}) {
+  const h = { 'User-Agent': 'Mozilla/4.0 WebTV/2.8 (compatible; MSIE 4.0)' };
+  if (headers['Content-Type']) h['Content-Type'] = headers['Content-Type'];
+  const r = await fetch(url, { method, headers: h, body, redirect: 'follow', signal: AbortSignal.timeout(20000) });
+  const out = new Uint8Array(await r.arrayBuffer());
+  log(`web ${method} ${url} -> ${r.status} (${out.length} bytes)`);
+  return { status: `${r.status} ${r.statusText || 'OK'}`, headers: { 'content-type': r.headers.get('content-type') || 'text/html' }, body: out };
+}
+
 // one service for all calls: registrations and sessions persist between calls
-const service = new WebTVService({ log: quiet });
+const service = new WebTVService({ log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
 
 net.createServer((sock) => {
   const who = `${sock.remoteAddress}:${sock.remotePort}`;
