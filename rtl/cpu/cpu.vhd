@@ -35,6 +35,7 @@ entity cpu is
       irqReplayAt           : in  unsigned(31 downto 0) := (others => '1'); -- issue number of the instruction an interrupt preempts
       dbg_issued            : out unsigned(31 downto 0); -- instructions that entered execute so far
       dbg_retired           : out std_logic;             -- WebTV: pulse (clk93) per instruction counted by LOCKSTEP_COUNT
+      dbg_pc                : out unsigned(31 downto 0); -- WebTV: PC of the instruction entering execute (bring-up display)
       irqCartRequest        : in  std_logic;
       cpuPaused             : in  std_logic;
       
@@ -125,7 +126,7 @@ architecture arch of cpu is
    signal writefifo_Rd                 : std_logic := '0';
    signal writefifo_Empty              : std_logic;
    signal writefifo_block              : std_logic;
-   signal writefifo_cnt                : integer range 0 to 7;
+   signal writefifo_cnt                : integer range 0 to 15;
           
    signal writefifo_rd_1x              : std_logic := '0';
    signal writefifo_rd_93              : std_logic := '0';
@@ -545,6 +546,7 @@ architecture arch of cpu is
    signal COP0ReadValue                : unsigned(63 downto 0) := (others => '0');
    
    signal COP1_enable                  : std_logic;
+   signal COP1_enableDec               : std_logic;
    signal COP2_enable                  : std_logic;
    signal fpuRegMode                   : std_logic;
    signal privilegeMode                : unsigned(1 downto 0);
@@ -821,7 +823,10 @@ begin
    iSyncFifo: entity mem.SyncFifoFallThroughMLAB
    generic map
    (
-      SIZE              => 8,
+      -- WebTV: 16 deep (was 8). A 32-byte D-cache writeback queues 4 words at once after only checking
+      -- writefifo_block (>= 4 queued); with an instruction fetch on top the 8-entry FIFO (count wraps
+      -- at 8) could lose its contents while DDR3 drains slowly.
+      SIZE              => 16,
       DATAWIDTH         => 108, -- 64bit data, 32bit address, 8 bit byte enable, 1 bit stage1/4, 1 bit r/w, 1 bit 64bit access, 1 bit cache
       NEARFULLDISTANCE  => 4
    )
@@ -1777,14 +1782,14 @@ begin
                      when 16#11# => -- COP1
                         decodeResultMux         <= RESULTMUX_FPU;
                         if (decSource1(4) = '1') then -- FPU execute
-                           decodeFPUCommandEnable  <= COP1_enable;
+                           decodeFPUCommandEnable  <= COP1_enableDec;
                            if (decFunct = 2) then
                               if (decSource1 = 16) then decodeFPUMULS <= '1'; end if;
                               if (decSource1 = 17) then decodeFPUMULD <= '1'; end if;
                            end if;
                         else
                            decodeFPUTarget         <= decRD;
-                           decodeFPUTransferEnable <= COP1_enable;
+                           decodeFPUTransferEnable <= COP1_enableDec;
                            if (decSource1(3 downto 0) < 3) then
                               decodeResultWriteEnable <= '1';
                            end if;
@@ -1794,7 +1799,7 @@ begin
                               if (decSource2(1) = '1') then blockIRQ <= '1'; end if;
                            end if;
                         end if;
-                        if (COP1_enable = '0' or (decSource1(4) = '0' and decSource1(3 downto 0) > 8)) then
+                        if (COP1_enableDec = '0' or (decSource1(4) = '0' and decSource1(3 downto 0) > 8)) then
                            decodeExcType           <= EXCTYPE_DECODE;
                            decodeExcCode           <= x"B";
                            decodeExcCOP            <= "01";
@@ -1982,7 +1987,7 @@ begin
 
                      when 16#31# => -- LWC1
                         decodeLoadType          <= LOADTYPE_DWORD;
-                        if (COP1_enable = '0') then
+                        if (COP1_enableDec = '0') then
                            decodeExcType           <= EXCTYPE_DECODE;
                            decodeExcCode           <= x"B";
                            decodeExcCOP            <= "01";
@@ -2008,7 +2013,7 @@ begin
                      when 16#35# => -- LDC1 
                         decodeMem64Bit          <= '1';
                         decodeLoadType          <= LOADTYPE_QWORD;
-                        if (COP1_enable = '0') then
+                        if (COP1_enableDec = '0') then
                            decodeExcType           <= EXCTYPE_DECODE;
                            decodeExcCode           <= x"B";
                            decodeExcCOP            <= "01";
@@ -2040,7 +2045,7 @@ begin
                         else
                            decodeMemWriteType <= MEMWRITETYPE_COP1L;
                         end if;
-                        if (COP1_enable = '0') then
+                        if (COP1_enableDec = '0') then
                            decodeExcType           <= EXCTYPE_DECODE;
                            decodeExcCode           <= x"B";
                            decodeExcCOP            <= "01";
@@ -2068,7 +2073,7 @@ begin
                      when 16#3D# => -- SDC1 
                         decodeMem64Bit          <= '1';
                         decodeMemWriteType      <= MEMWRITETYPE_COP1D;
-                        if (COP1_enable = '0') then
+                        if (COP1_enableDec = '0') then
                            decodeExcType           <= EXCTYPE_DECODE;
                            decodeExcCode           <= x"B";
                            decodeExcCOP            <= "01";
@@ -2263,6 +2268,12 @@ begin
    replayIrqHit   <= '1' when (IRQ_REPLAY = '1' and issueNow = '1' and issueCount = irqReplayAt) else '0';
    dbg_issued     <= issueCount;
    dbg_retired    <= instrRetired;
+   dbg_pc         <= PCold1(31 downto 0);
+
+   -- WebTV: CU1 for the instruction in decode. An mtc0 to Status two instructions ahead is written
+   -- into COP0 only at the end of this cycle (it is in stage 4 now), so forward the value it writes:
+   -- the OS entry does "mtc0 Status (CU1) ; lui ; ctc1" and the JS model / R4640 run it without a trap.
+   COP1_enableDec <= executeCOP0WriteValue(29) when (executeCOP0WriteEnable = '1' and executeCOP0Register = 12) else COP1_enable;
    process (clk93)
    begin
       if (rising_edge(clk93)) then

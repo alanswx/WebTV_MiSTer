@@ -63,6 +63,7 @@ localparam CONF_STR = {
 	"O[122:121],Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"O[1],Answer Disk Boot prompt,Yes,No;",
 	"O[2],Serial port,Debug console,Modem;",
+	"O[3],Debug overlay,Off,On;",
 	"-;",
 	"J1,Select,Back,Home,Options,Scroll Up,Scroll Down,Power;",
 	"-;",
@@ -161,7 +162,18 @@ wire        vid_ce, vid_hblank, vid_vblank, vid_hsync, vid_vsync;
 
 assign DDRAM_CLK = clk_2x;
 
-webtv_mister webtv
+// WEBTV_SLOW (qsf VERILOG_MACRO): the PLL runs 50 / 75 / 100 MHz instead of 62.5 / 93.75 / 125 (bring-up)
+`ifdef WEBTV_SLOW
+localparam CLK1X_HZ = 50000000;
+localparam CLK93_HZ = 75000000;
+`else
+localparam CLK1X_HZ = 62500000;
+localparam CLK93_HZ = 93750000;
+`endif
+
+wire [7:0] ov_r, ov_g, ov_b;
+
+webtv_mister #(.CLK1X_HZ(CLK1X_HZ), .CLK93_HZ(CLK93_HZ)) webtv
 (
 	.clk1x          (clk_1x),
 	.clk93          (clk_93),
@@ -212,6 +224,10 @@ webtv_mister webtv
 	.vid_vblank     (vid_vblank),
 	.vid_hsync      (vid_hsync),
 	.vid_vsync      (vid_vsync),
+	.debug_overlay  (status[3]),
+	.vga_r          (ov_r),
+	.vga_g          (ov_g),
+	.vga_b          (ov_b),
 
 	.ddr3_BUSY      (DDRAM_BUSY),
 	.ddr3_DOUT      (DDRAM_DOUT),
@@ -228,7 +244,7 @@ webtv_mister webtv
 // The picture comes from the framebuffer (640x480, 32 bit R,G,B,x) through the scaler.
 // The core's own video output carries only the timing (black) until a scanout path exists.
 
-assign FB_EN      = fb_en;
+assign FB_EN      = fb_en & ~status[3];
 assign FB_FORMAT  = 5'b00110;
 assign FB_WIDTH   = 12'd640;
 assign FB_HEIGHT  = 12'd480;
@@ -241,9 +257,9 @@ assign CE_PIXEL  = vid_ce;
 assign VGA_DE    = ~(vid_hblank | vid_vblank);
 assign VGA_HS    = vid_hsync;
 assign VGA_VS    = vid_vsync;
-assign VGA_R     = 8'd0;
-assign VGA_G     = 8'd0;
-assign VGA_B     = 8'd0;
+assign VGA_R     = ov_r;
+assign VGA_G     = ov_g;
+assign VGA_B     = ov_b;
 
 assign LED_USER  = ~rom_loaded | ~running;
 assign LED_DISK  = {1'b0, sd_ack};

@@ -39,6 +39,7 @@ entity webtv_core is
       reset_1x         : in  std_logic;
       reset_93         : in  std_logic;
       reset_mem        : in  std_logic := '0';  -- DDR3 mux only: stays out of reset while the CPU is held, so the HPS can load
+      cold_reset       : in  std_logic := '0';  -- power-on / OSD reset: SOLO units back to their power-up state
 
       -- CPU interrupt: from the SOLO, or (IRQ_EXTERNAL = '1', lock-step testbench) from irqRequest
       irqRequest       : in  std_logic := '0';
@@ -129,7 +130,17 @@ entity webtv_core is
       ddr3_WE          : out std_logic;
       ddr3_RD          : out std_logic;
 
-      errors           : out std_logic_vector(7 downto 0);  -- 5:0 CPU, 6 DDR3 timeout, 7 memmux
+      errors           : out std_logic_vector(7 downto 0);
+      dbg_retired_cnt  : out unsigned(31 downto 0);           -- instructions issued (clk93), for bring-up displays
+      dbg_pc           : out unsigned(31 downto 0);
+      dbg_scr          : out std_logic_vector(159 downto 0);  -- last 5 words written to 0x1E00001C (boot ROM exception dump)
+      -- bring-up branch trace: the last 1024 non-sequential PCs (count & pc), frozen when the CPU
+      -- reaches the boot ROM exception vectors (0xBFC00380..0xBFC003FF); read port on clk1x
+      dbg_ide          : out std_logic_vector(95 downto 0);  -- state & total & last access (addr low 16, data low 16) & count
+      trace_frozen     : out std_logic;
+      trace_wi         : out unsigned(9 downto 0);
+      trace_ra         : in  unsigned(9 downto 0) := (others => '0');
+      trace_q          : out std_logic_vector(63 downto 0);  -- 5:0 CPU, 6 DDR3 timeout, 7 memmux
 
       -- savestate port (CPU state load: reset values, JS snapshots)
       SS_reset         : in  std_logic := '0';
@@ -141,12 +152,14 @@ entity webtv_core is
       LOCKSTEP_COUNT   : in  std_logic := '0';
       IRQ_REPLAY       : in  std_logic := '0';
       irqReplayAt      : in  unsigned(31 downto 0) := (others => '1');
+-- synthesis translate_off
+      cpu_done         : out std_logic;
+      cpu_export       : out cpu_export_type;
+-- synthesis translate_on
       dbg_issued       : out unsigned(31 downto 0);
       dbg_solo_rd      : out std_logic;                      -- SOLO system unit answered a read (bus_done)
       dbg_solo_addr    : out unsigned(31 downto 0);
-      dbg_solo_data    : out std_logic_vector(31 downto 0);
-      cpu_done         : out std_logic;
-      cpu_export       : out cpu_export_type
+      dbg_solo_data    : out std_logic_vector(31 downto 0)
    );
 end entity;
 
@@ -202,6 +215,17 @@ architecture arch of webtv_core is
    signal i_selRead  : std_logic := '0';
    signal ideSet, ideClr, ideLevel : std_logic;
    signal retCnt     : unsigned(15 downto 0) := (others => '0');
+   signal retCnt32   : unsigned(31 downto 0) := (others => '0');
+   signal cpuPc, pcR : unsigned(31 downto 0) := (others => '0');
+   signal scrHist    : std_logic_vector(159 downto 0) := (others => '0');
+   signal ideState   : std_logic_vector(15 downto 0);
+   signal ideTotal   : std_logic_vector(31 downto 0);
+   signal ideLastA, ideLastD, ideCnt : std_logic_vector(15 downto 0) := (others => '0');
+   type tTrace is array(0 to 1023) of std_logic_vector(63 downto 0);
+   signal traceMem   : tTrace;
+   signal trWi       : unsigned(9 downto 0) := (others => '0');
+   signal trFrozen   : std_logic := '0';
+   signal trPrev     : unsigned(31 downto 0) := (others => '0');
    signal r_handles, r_sel, r_read, r_write, r_done, irIrq : std_logic;
    signal r_dataRead : std_logic_vector(31 downto 0);
    signal r_selRead  : std_logic := '0';
@@ -227,7 +251,7 @@ begin
       DISABLE_BOOTCOUNT => '0', DISABLE_DTLBMINI => '0',
       irqRequest => cpuIrq,
       LOCKSTEP_COUNT => LOCKSTEP_COUNT, COUNT_EXTERNAL => countExt, countTick => tick,
-      IRQ_REPLAY => IRQ_REPLAY, irqReplayAt => irqReplayAt, dbg_issued => dbg_issued, dbg_retired => retired,
+      IRQ_REPLAY => IRQ_REPLAY, irqReplayAt => irqReplayAt, dbg_issued => dbg_issued, dbg_retired => retired, dbg_pc => cpuPc,
       irqCartRequest => '0', cpuPaused => '0',
       error_instr => errors(0), error_stall => errors(1), error_FPU => errors(2),
       error_exception => errors(3), error_fifo => errors(4), error_TLB => errors(5),
@@ -237,7 +261,9 @@ begin
       rdram_granted2x => d_granted2x(DDR3_CPU), rdram_done => '0',
       ddr3_DOUT => ddr3_DOUT, ddr3_DOUT_READY => ddr3_DOUT_READY,
       ram_done => '0', ram_rnw => '0', ram_dataRead => (others => '0'),
+-- synthesis translate_off
       cpu_done => cpu_done, cpu_export => cpu_export,
+-- synthesis translate_on
       SS_reset => SS_reset, loading_savestate => '0',
       SS_DataWrite => SS_Data, SS_Adr => SS_Adr, SS_wren_CPU => SS_wren, SS_rden_CPU => '0',
       SS_DataRead_CPU => open, SS_idle => open
@@ -314,7 +340,7 @@ begin
 
    isolo : entity work.webtv_solo_sys
    port map (
-      clk1x => clk1x, clk93 => clk93, reset => reset_1x,
+      clk1x => clk1x, clk93 => clk93, reset => reset_1x, cold_reset => cold_reset,
       bus_addr => m_addr(15 downto 0), bus_read => s_read, bus_write => s_write, bus_be => m_be,
       bus_dataWrite => m_dataWrite, bus_dataRead => s_dataRead, bus_done => s_done, handles => s_handles,
       irq => soloIrq,
@@ -325,10 +351,44 @@ begin
       dbg_tx => dbg_tx, dbg_tx_data => dbg_tx_data, dbg_rx => dbg_rx, dbg_rx_data => dbg_rx_data,
       vid_cleared => vidCleared, vid_load => vidLoad, vid_level => vidSum, vid_en_set => vidEnSet,
       dev_set => "00000" & irIrq & "00",
-      rio_set => "0000" & ideSet & uSet & "00", rio_clr => "0000" & ideClr & uClr & "00",
+      -- (outside lock-step the RIO status bits stay latched until software clears them, as on the
+      -- chip; the JS model lowers them with the device line, which lock-step runs must follow)
+      rio_set => "0000" & ideSet & uSet & "00",
+      rio_clr => ("0000" & ideClr & uClr & "00") and (7 downto 0 => LOCKSTEP_COUNT),
       rio_level => "0000" & ideLevel & uLevel & "00",
       init_we => solo_init_we, init_addr => solo_init_addr, init_data => solo_init_data
    );
+
+   dbg_retired_cnt <= retCnt32;
+   dbg_pc          <= pcR;
+   dbg_scr         <= scrHist;
+   dbg_ide         <= ideState & ideTotal & ideLastA & ideLastD & ideCnt;
+   process (clk1x)
+   begin
+      if rising_edge(clk1x) then
+         if (i_done = '1') then
+            ideCnt   <= std_logic_vector(unsigned(ideCnt) + 1);
+            ideLastA <= std_logic_vector(s_lastAddr(23 downto 8)) ;
+            ideLastD <= std_logic_vector(s_lastAddr(7 downto 0)) & i_dataRead(7 downto 0);
+         end if;
+      end if;
+   end process;
+   trace_frozen    <= trFrozen;
+   trace_wi        <= trWi;
+   process (clk1x)
+   begin
+      if rising_edge(clk1x) then
+         trace_q <= traceMem(to_integer(trace_ra));
+      end if;
+   end process;
+   process (clk1x)
+   begin
+      if rising_edge(clk1x) then
+         if (m_write = '1' and m_addr = x"1E00001C") then
+            scrHist <= scrHist(127 downto 0) & m_dataWrite;
+         end if;
+      end if;
+   end process;
 
    ---------------------------------------------------------------- IDE disk (RIO device 1)
    -- retired-instruction count (CPU clock) for the lock-step busy time
@@ -336,6 +396,16 @@ begin
    begin
       if rising_edge(clk93) then
          if (retired = '1') then retCnt <= retCnt + 1; end if;
+         if (retired = '1') then
+            retCnt32 <= retCnt32 + 1; pcR <= cpuPc;
+            trPrev   <= cpuPc;
+            if (trFrozen = '0' and cpuPc /= trPrev + 4) then
+               traceMem(to_integer(trWi)) <= std_logic_vector(retCnt32) & std_logic_vector(cpuPc);
+               trWi <= trWi + 1;
+               if (cpuPc(31 downto 7) = x"BFC003" & "1") then trFrozen <= '1'; end if;
+            end if;
+         end if;
+         if (reset_93 = '1' and SS_reset = '1') then trFrozen <= '0'; end if;
       end if;
    end process;
 
@@ -349,6 +419,7 @@ begin
       img_mounted => img_mounted, img_size => img_size,
       sd_lba => sd_lba, sd_blk_cnt => sd_blk_cnt, sd_rd => sd_rd, sd_wr => sd_wr, sd_ack => sd_ack,
       sd_buff_addr => sd_buff_addr, sd_buff_dout => sd_buff_dout, sd_buff_din => sd_buff_din, sd_buff_wr => sd_buff_wr,
+      dbg_state => ideState, dbg_total => ideTotal,
       init_we => ide_init_we, init_addr => ide_init_addr, init_data => ide_init_data
    );
 

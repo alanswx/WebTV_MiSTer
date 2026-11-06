@@ -72,6 +72,8 @@ entity webtv_ide is
       sd_buff_din      : out std_logic_vector(15 downto 0);
       sd_buff_wr       : in  std_logic;
 
+      dbg_state        : out std_logic_vector(15 downto 0);   -- haveDisk, present, status (bring-up display)
+      dbg_total        : out std_logic_vector(31 downto 0);
       -- raw state load (JS snapshots): see the init process
       init_we          : in  std_logic := '0';
       init_addr        : in  unsigned(15 downto 0) := (others => '0');
@@ -108,6 +110,7 @@ architecture arch of webtv_ide is
 
    -- transfer
    signal haveDisk  : std_logic := '0';
+   signal mounted   : std_logic := '0';
    signal total     : unsigned(31 downto 0) := (others => '0');   -- sectors
    signal cyls      : unsigned(15 downto 0) := (others => '0');
    signal bufValid  : std_logic := '0';    -- JS buf != null (read data / IDENTIFY)
@@ -132,7 +135,7 @@ architecture arch of webtv_ide is
    signal sdWriting : std_logic := '0';
 
    -- sequencer
-   type tState is (IDLE, RD1, RD2, WR, SETLBA, SETLBA_DIV, START_READ, FINISH, WRITE_START, VERIFY_DONE);
+   type tState is (IDLE, RD1, RD2, RD_HOLD, WR, SETLBA, SETLBA_DIV, START_READ, FINISH, WRITE_START, VERIFY_DONE);
    signal state     : tState := IDLE;
    signal ret       : tState := IDLE;
    signal reqRd     : std_logic := '0';
@@ -145,6 +148,7 @@ architecture arch of webtv_ide is
    signal xferPending : std_logic := '0';  -- JS: an ide-read / ide-write event is scheduled
    signal afterRead : std_logic := '0';    -- ... and it is the finish of a read (else of a write)
    signal sdAck1    : std_logic := '0';
+   signal holdCnt   : integer range 0 to 15 := 0;
    signal busyCnt   : unsigned(15 downto 0) := (others => '0');   -- free-running mode: clk1x cycles
    signal busyStart : unsigned(15 downto 0) := (others => '0');   -- lock-step: retired_cnt at the start
    signal dataIn    : std_logic := '0';    -- HPS transfer finished
@@ -218,6 +222,8 @@ architecture arch of webtv_ide is
 begin
 
    handles   <= '1' when bus_addr >= x"1E400000" and bus_addr <= x"1E80001F" else '0';
+   dbg_state <= haveDisk & rDrvHead(4) & xferPending & "00000" & rStatus;
+   dbg_total <= std_logic_vector(total);
    irq_level <= irq and not rDevCtl(1);
 
    ---------------------------------------------------------------- sector buffer
@@ -309,10 +315,19 @@ begin
             reqData <= bus_dataWrite;
          end if;
 
-         -- mounted image
-         if (img_mounted = '1') then
+         -- mounted image: hps_io pulses img_mounted and sends img_size in a separate transfer, so
+         -- follow img_size after a mount; a drive that appears (also after reset: MiSTer mounts the
+         -- image after the core starts) comes up ready, as the JS drive does at power-on
+         if (img_mounted = '1') then mounted <= '1'; end if;
+         if ((mounted = '1' or img_mounted = '1') and img_size(40 downto 9) /= total) then
             total <= img_size(40 downto 9);
-            if (img_size = 0) then haveDisk <= '0'; else haveDisk <= '1'; end if;
+            if (img_size(40 downto 9) = 0) then
+               haveDisk <= '0';
+               rStatus  <= x"00";
+            else
+               haveDisk <= '1';
+               if (haveDisk = '0') then rStatus <= S_IDLE; rError <= x"01"; end if;
+            end if;
             geoQ  <= (others => '0');
             geoR  <= (others => '0');
             geoN  <= 33;
@@ -418,12 +433,28 @@ begin
                      if present(haveDisk, rDrvHead) then
                         v(7 downto 0) := rStatus;
                         setIrq('0');
+                        -- complete the read only once the lowered line has reached the CPU: in the
+                        -- JS model the read clears the interrupt at once, and the next instruction
+                        -- must not take it (the OS reports a "Spurious interrupt" otherwise)
+                        if (irq = '1') then
+                           bus_done <= '0';
+                           holdCnt  <= 12;
+                           state    <= RD_HOLD;
+                        end if;
                      end if;
                   when 8 => if present(haveDisk, rDrvHead) then v(7 downto 0) := rStatus; end if;
                   when 9 => v(7 downto 0) := x"FF";
                   when others => null;
                end case;
                bus_dataRead <= v;
+
+            when RD_HOLD =>
+               if (holdCnt = 0) then
+                  bus_done <= '1';
+                  state    <= IDLE;
+               else
+                  holdCnt <= holdCnt - 1;
+               end if;
 
             ------------------------------------------------ register writes
             when WR =>

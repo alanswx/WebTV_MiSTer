@@ -21,8 +21,10 @@ entity webtv_mister is
    generic
    (
       CLK1X_HZ  : natural := 62500000;
+      CLK93_HZ  : natural := 93750000;
       BAUD      : natural := 115200;
       CLEAR_RAM : boolean := true;
+      DISK_WAIT_MS : natural := 3000;      -- how long the CPU start waits for a disk image mount
       RAM_BYTES : natural := 8 * 1024 * 1024
    );
    port
@@ -82,6 +84,9 @@ entity webtv_mister is
       fb_en            : out std_logic := '0';   -- a frame has been rendered since the start
       fb_base          : out std_logic_vector(31 downto 0);
       vid_ce           : out std_logic;
+      -- bring-up overlay on the core's own video (rows of bit boxes, see the overlay process)
+      debug_overlay    : in  std_logic := '0';
+      vga_r, vga_g, vga_b : out std_logic_vector(7 downto 0);
       vid_hblank, vid_vblank, vid_hsync, vid_vsync : out std_logic;
 
       -- MiSTer DDR3
@@ -102,16 +107,26 @@ architecture arch of webtv_mister is
    constant DDR3_WINDOW : unsigned(31 downto 0) := x"30000000";
    constant ROM_BASE    : unsigned(27 downto 0) := x"0800000";
    constant SR_RESET    : std_logic_vector(63 downto 0) := x"0000000000400004";  -- BEV | ERL
-   constant CONFIG_RESET: std_logic_vector(63 downto 0) := x"0000000000026033";  -- K0 = 3 (cached)
+   -- R4640 Config: 8 KB I and D caches (IC = DC = 1), 32-byte lines, K0 = 3. The caches really are
+   -- 8 KB, and the boot ROM sizes its cache flushes from this register. (The JS model reports 4 KB,
+   -- 0x00026033, which only the lock-step testbench uses: with it the ROM flushes half the D-cache
+   -- and the OS code it copied to RAM is fetched stale.)
+   -- (the CPU takes the R4640 Config from the upper half of savestate slot 16)
+   constant CONFIG_RESET: std_logic_vector(63 downto 0) := x"0002627300000003";
    constant COMPARE_RESET : std_logic_vector(63 downto 0) := x"00000000FFFFFFFF";
 
    -- reset / boot sequencing (clk1x)
-   type tBoot is (WAIT_ROM, LOADING, CLEAR, HOLD, RUN);
+   type tBoot is (WAIT_ROM, LOADING, CLEAR, WAIT_DISK, HOLD, RUN);
    signal boot        : tBoot := WAIT_ROM;
+   -- synthesis translate_off
+   signal bootLast    : tBoot := WAIT_ROM;
+   -- synthesis translate_on
    signal memReset    : std_logic := '1';
    signal holdCnt     : unsigned(4 downto 0) := (others => '0');
+   signal diskWait    : integer range 0 to DISK_WAIT_MS * (CLK1X_HZ / 1000) := 0;
    signal hold1x      : std_logic := '1';
    signal reset_1x    : std_logic := '1';
+   signal coldReset   : std_logic := '0';   -- RAM clear = a power-on or OSD reset (not the OS's own reset)
    signal romLoaded   : std_logic := '0';
    signal dl_1        : std_logic := '0';
 
@@ -142,6 +157,30 @@ architecture arch of webtv_mister is
    signal bus_read, bus_write, bus_done : std_logic;
    signal fb_display  : unsigned(27 downto 0);
    signal fb_frame    : std_logic;
+   signal retiredCnt  : unsigned(31 downto 0);
+   signal pcI         : unsigned(31 downto 0);
+   signal scrI        : std_logic_vector(159 downto 0);
+   signal ideI        : std_logic_vector(95 downto 0);
+   -- branch-trace dump to DDR3 window offset 0xFA0000 (past framebuffer 1) (1024 x 64 bit: count & pc, oldest first),
+   -- then a marker word C0DEDEAD_<wi> at 0xFA2000; read from Linux via /dev/mem 0x30FA0000
+   signal trFrozen    : std_logic;
+   signal trWi        : unsigned(9 downto 0);
+   signal trRA        : unsigned(9 downto 0) := (others => '0');
+   signal trQ         : std_logic_vector(63 downto 0);
+   signal dumpIdx     : integer range 0 to 1025 := 0;
+   signal dumpPh      : integer range 0 to 3 := 0;
+   signal dumped      : std_logic := '0';
+   signal ledI        : std_logic_vector(31 downto 0);
+   signal errI        : std_logic_vector(7 downto 0);
+   signal vceI, hbI, vbI : std_logic;
+   signal ovX, ovY    : integer range 0 to 1023 := 0;
+   signal hb1         : std_logic := '0';
+   signal txCount, frCount, sdCount : unsigned(15 downto 0) := (others => '0');
+   signal sdRdSeen, sdAckSeen, imgSeen, srstSeen : std_logic := '0';
+   signal errSticky   : std_logic_vector(7 downto 0) := (others => '0');
+   signal sdRdI, sdAck1 : std_logic := '0';
+   type tOvRows is array(0 to 19) of std_logic_vector(15 downto 0);
+   signal ovRows      : tOvRows;
    signal sdLba       : unsigned(31 downto 0);
    signal sdBlkCnt    : unsigned(5 downto 0);
    signal mTxd, mRtsN : std_logic;
@@ -161,8 +200,11 @@ architecture arch of webtv_mister is
    -- serial
    constant BAUD_DIV  : natural := (CLK1X_HZ + BAUD / 2) / BAUD;
    type tFifo is array(0 to 63) of std_logic_vector(7 downto 0);
-   signal txFifo      : tFifo;
-   signal txWr, txRd  : unsigned(5 downto 0) := (others => '0');
+   type tTxFifo is array(0 to 1023) of std_logic_vector(7 downto 0);
+   signal txFifo      : tTxFifo;
+   signal txWr, txRd  : unsigned(9 downto 0) := (others => '0');
+   signal txQ         : std_logic_vector(7 downto 0) := (others => '0');
+   signal txWait      : integer range 0 to 2 := 0;
    signal txShift     : std_logic_vector(9 downto 0) := (others => '1');
    signal txBits      : integer range 0 to 10 := 0;
    signal txCnt       : integer range 0 to BAUD_DIV := 0;
@@ -287,6 +329,73 @@ architecture arch of webtv_mister is
 begin
 
    rom_loaded <= romLoaded;
+   led        <= ledI;
+   errors     <= errI;
+   sd_rd      <= sdRdI;
+   vid_ce     <= vceI;
+   vid_hblank <= hbI;
+   vid_vblank <= vbI;
+
+   ---------------------------------------------------------------- bring-up overlay
+   -- 8 rows of 16 bit boxes (MSB left), white = 1:
+   --  0: rom_loaded running fb_en ioctl_download sd_rd-seen sd_ack-seen img-mounted soft-reset | errors(7:0)
+   --  1: instructions(31:16)   2: instructions(15:0)   3: debug serial bytes   4: frames rendered
+   --  5: SOLO LED(15:0)        6: last two debug serial chars   7: disk transfers
+   --  8, 9: PC of an instruction entering execute (31:16, 15:0)
+   --  10..19: the last 5 words written to 0x1E00001C (hi, lo; oldest first): the boot ROM's exception
+   --          handler stores Status, Cause, EPC, BadVAddr, Config there before it hangs
+   process (clk1x)
+      variable r, b, bit : integer;
+   begin
+      if rising_edge(clk1x) then
+         if (dbg_tx = '1') then txCount <= txCount + 1; end if;
+         if (fb_frame = '1') then frCount <= frCount + 1; end if;
+         sdAck1 <= sd_ack;
+         if (sd_ack = '1' and sdAck1 = '0') then sdCount <= sdCount + 1; end if;
+         if (sdRdI = '1') then sdRdSeen <= '1'; end if;
+         if (sd_ack = '1') then sdAckSeen <= '1'; end if;
+         if (img_mounted = '1') then imgSeen <= '1'; end if;
+         if (soft_reset = '1') then srstSeen <= '1'; end if;
+         errSticky <= errSticky or errI;
+         ovRows(0) <= romLoaded & (not hold1x) & fb_en & ioctl_download & sdRdSeen & sdAckSeen & imgSeen & srstSeen & errSticky;
+         ovRows(1) <= std_logic_vector(retiredCnt(31 downto 16));
+         ovRows(2) <= std_logic_vector(retiredCnt(15 downto 0));
+         ovRows(3) <= std_logic_vector(txCount);
+         ovRows(4) <= std_logic_vector(frCount);
+         ovRows(5) <= ledI(15 downto 0);
+         ovRows(6) <= lastTx(8) & lastTx(9);
+         ovRows(7) <= std_logic_vector(sdCount);
+         ovRows(8) <= std_logic_vector(pcI(31 downto 16));
+         ovRows(9) <= std_logic_vector(pcI(15 downto 0));
+         -- 10: IDE haveDisk, DRV, xferPending, status   11/12: sectors   13: last address bits 23:8
+         -- 14: last address 7:0 & last read data 7:0   15: IDE accesses   16..19: exception dump Cause, EPC
+         for i in 0 to 5 loop
+            ovRows(10 + i) <= ideI(95 - 16 * i downto 80 - 16 * i);
+         end loop;
+         ovRows(16) <= scrI(127 downto 112); ovRows(17) <= scrI(111 downto 96);
+         ovRows(18) <= scrI(95 downto 80);   ovRows(19) <= scrI(79 downto 64);
+         if (vceI = '1') then
+            hb1 <= hbI;
+            if (hbI = '1') then ovX <= 0; elsif (ovX < 1023) then ovX <= ovX + 1; end if;
+            if (hbI = '1' and hb1 = '0') then
+               if (vbI = '1') then ovY <= 0; elsif (ovY < 1023) then ovY <= ovY + 1; end if;
+            end if;
+            vga_r <= x"00"; vga_g <= x"00"; vga_b <= x"00";
+            if (debug_overlay = '1' and ovY >= 40 and ovY < 40 + 20 * 20 and ovX >= 64 and ovX < 64 + 16 * 32) then
+               r := (ovY - 40) / 20; b := (ovX - 64) / 32; bit := 15 - b;
+               if ((ovY - 40) mod 20 >= 3 and (ovX - 64) mod 32 >= 3) then
+                  if (ovRows(r)(bit) = '1') then
+                     vga_r <= x"F0"; vga_g <= x"F0"; vga_b <= x"F0";
+                  elsif (r = 0) then
+                     vga_r <= x"60"; vga_g <= x"10"; vga_b <= x"10";
+                  else
+                     vga_r <= x"30"; vga_g <= x"30"; vga_b <= x"50";
+                  end if;
+               end if;
+            end if;
+         end if;
+      end if;
+   end process;
    -- serial port routing
    uart_txd <= mTxd when uart_modem = '1' else dbgTxd;
    mRxd     <= uart_rxd when uart_modem = '1' else '1';
@@ -348,11 +457,12 @@ begin
 
          -- RAM clear
          if (boot = CLEAR) then
+            diskWait <= 0;
             if (not CLEAR_RAM) then
-               boot <= HOLD; holdCnt <= (others => '1');
+               boot <= WAIT_DISK;
             elsif (hpsBusy = '0' and hpsReq = '0') then
                if (clearAddr = to_unsigned(RAM_BYTES, 24)) then
-                  boot <= HOLD; holdCnt <= (others => '1');
+                  boot <= WAIT_DISK;
                else
                   hpsAddr   <= resize(clearAddr, 28);
                   hpsData   <= (others => '0');
@@ -363,10 +473,43 @@ begin
             end if;
          end if;
 
+         -- give the HPS up to 3 s to mount the disk image (the OS probes the IDE drive early)
+         if (boot = WAIT_DISK) then
+            if (imgSeen = '1' or diskWait = DISK_WAIT_MS * (CLK1X_HZ / 1000)) then
+               boot <= HOLD; holdCnt <= (others => '1');
+            else
+               diskWait <= diskWait + 1;
+            end if;
+         end if;
+
          -- hold the CPU long enough for the clk93 side to see it
          if (boot = HOLD) then
             if (holdCnt = 0) then boot <= RUN; else holdCnt <= holdCnt - 1; end if;
          end if;
+
+         -- branch trace dump (the HPS client is idle while running)
+         if (boot = RUN and trFrozen = '1' and dumped = '0' and hpsBusy = '0' and hpsReq = '0') then
+            if (dumpPh = 0) then
+               trRA   <= trWi + to_unsigned(dumpIdx mod 1024, 10);
+               dumpPh <= 1;
+            elsif (dumpPh < 3) then
+               dumpPh <= dumpPh + 1;                  -- trQ valid after the registered read
+            else
+               dumpPh  <= 0;
+               hpsReq  <= '1';
+               hpsBusy <= '1';
+               if (dumpIdx = 1024) then
+                  hpsAddr <= x"0FA2000";
+                  hpsData <= x"C0DEDEAD" & x"00000" & "00" & std_logic_vector(trWi);
+                  dumped  <= '1';
+               else
+                  hpsAddr <= x"0FA0000" + to_unsigned(dumpIdx * 8, 28);
+                  hpsData <= trQ;
+                  dumpIdx <= dumpIdx + 1;
+               end if;
+            end if;
+         end if;
+         if (boot /= RUN) then dumped <= '0'; dumpIdx <= 0; dumpPh <= 0; end if;
 
          if (boot = RUN and soft_reset = '1') then
             boot <= HOLD; holdCnt <= (others => '1');
@@ -381,6 +524,11 @@ begin
          end if;
 
          if (boot = RUN) then hold1x <= '0'; else hold1x <= '1'; end if;
+         if (boot = CLEAR) then coldReset <= '1'; else coldReset <= '0'; end if;
+         -- synthesis translate_off
+         bootLast <= boot;
+         if (boot /= bootLast) then report "boot state " & tBoot'image(boot); end if;
+         -- synthesis translate_on
          reset_1x <= hold1x;
       end if;
    end process;
@@ -411,31 +559,36 @@ begin
 
    ---------------------------------------------------------------- core
    icore : entity work.webtv_core
+   generic map (CLK93_HZ => CLK93_HZ, CLK1X_HZ => CLK1X_HZ)
    port map (
       clk1x => clk1x, clk93 => clk93, clk2x => clk2x,
-      reset_1x => reset_1x, reset_93 => reset_93, reset_mem => memReset,
+      reset_1x => reset_1x, reset_93 => reset_93, reset_mem => memReset, cold_reset => coldReset,
       irqRequest => '0', IRQ_EXTERNAL => '0', solo_irq => open,
-      serial_id => serial_id, soft_reset => soft_reset, led => led,
+      serial_id => serial_id, soft_reset => soft_reset, led => ledI,
       dbg_tx => dbg_tx, dbg_tx_data => dbg_tx_data, dbg_rx => dbg_rx, dbg_rx_data => dbg_rx_data,
       bus_addr => open, bus_read => bus_read, bus_write => bus_write, bus_be => open,
       bus_dataWrite => open, bus_dataRead => (others => '0'), bus_done => bus_done, bus_tick => open,
       img_mounted => img_mounted, img_size => unsigned(img_size),
-      sd_lba => sdLba, sd_blk_cnt => sdBlkCnt, sd_rd => sd_rd, sd_wr => sd_wr, sd_ack => sd_ack,
+      sd_lba => sdLba, sd_blk_cnt => sdBlkCnt, sd_rd => sdRdI, sd_wr => sd_wr, sd_ack => sd_ack,
       sd_buff_addr => unsigned(sd_buff_addr), sd_buff_dout => sd_buff_dout, sd_buff_din => sd_buff_din, sd_buff_wr => sd_buff_wr,
       modem_txd => mTxd, modem_rxd => mRxd, modem_dcd => uart_modem and not uart_dsr, modem_rts_n => mRtsN, modem_mcr => mMcr,
       ir_key_strobe => keyStrobe, ir_key_code => keyCode, ir_key_release => keyRelease,
       fb_display => fb_display, fb_frame => fb_frame,
-      vid_hblank => vid_hblank, vid_vblank => vid_vblank, vid_hsync => vid_hsync, vid_vsync => vid_vsync,
-      vid_ce => vid_ce,
+      vid_hblank => hbI, vid_vblank => vbI, vid_hsync => vid_hsync, vid_vsync => vid_vsync,
+      vid_ce => vceI,
       hps_request => hpsReq, hps_rnw => '0', hps_address => hpsAddr, hps_burstcount => 10x"001",
       hps_writeMask => x"FF", hps_dataWrite => hpsData, hps_done => hpsDone, hps_dataRead => open,
       ddr3_BUSY => ddr3_BUSY, ddr3_DOUT => ddr3_DOUT, ddr3_DOUT_READY => ddr3_DOUT_READY,
       ddr3_BURSTCNT => ddr3_BURSTCNT, ddr3_ADDR => ddr3_ADDR, ddr3_DIN => ddr3_DIN, ddr3_BE => ddr3_BE,
       ddr3_WE => ddr3_WE, ddr3_RD => ddr3_RD,
-      errors => errors,
+      errors => errI, dbg_retired_cnt => retiredCnt, dbg_pc => pcI, dbg_scr => scrI,
+      dbg_ide => ideI,
+      trace_frozen => trFrozen, trace_wi => trWi, trace_ra => trRA, trace_q => trQ,
       SS_reset => SS_reset, SS_wren => SS_wren, SS_Adr => SS_Adr, SS_Data => SS_Data,
-      dbg_issued => open, dbg_solo_rd => open, dbg_solo_addr => open, dbg_solo_data => open,
-      cpu_done => open, cpu_export => open
+-- synthesis translate_off
+      cpu_done => open, cpu_export => open,
+-- synthesis translate_on
+      dbg_issued => open, dbg_solo_rd => open, dbg_solo_addr => open, dbg_solo_data => open
    );
 
    -- keyboard / joystick -> IR keyboard key events (one per cycle; the keyboard first)
@@ -497,12 +650,18 @@ begin
             txFifo(to_integer(txWr)) <= dbg_tx_data;
             txWr <= txWr + 1;
          end if;
+         txQ <= txFifo(to_integer(txRd));          -- block RAM read (one cycle)
          if (txBits = 0) then
             if (txWr /= txRd) then
-               txShift <= '1' & txFifo(to_integer(txRd)) & '0';
-               txRd    <= txRd + 1;
-               txBits  <= 10;
-               txCnt   <= BAUD_DIV - 1;
+               if (txWait = 2) then
+                  txShift <= '1' & txQ & '0';
+                  txRd    <= txRd + 1;
+                  txBits  <= 10;
+                  txCnt   <= BAUD_DIV - 1;
+                  txWait  <= 0;
+               else
+                  txWait <= txWait + 1;
+               end if;
             end if;
          elsif (txCnt = 0) then
             txShift <= '1' & txShift(9 downto 1);

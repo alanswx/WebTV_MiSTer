@@ -16,5 +16,5 @@ gzcat $D/ref.txt.gz | awk -v f=$IDX '{for(i=4;i<=NF;i++) if ($i ~ /^IRQL=/) {sub
 gzcat $D/ref.txt.gz | awk -v f=$IDX '/ IRQ( |$)/{print $1 + 1 - f + k; k++}' > $D/irqat.txt
 # SOLO interrupt state changes: "<rel idx> <key> <hex>"
 gzcat $D/ref.txt.gz | awk -v f=$IDX '{for(i=4;i<=NF;i++) if ($i ~ /^S:/) {split(substr($i,3),a,"="); printf "%d %s %08s\n", $1 - f, a[1], a[2]}}' | tr ' ' ' ' > $D/solo_ev.txt
-$B/tb_cpu -gsnap_dir=$D -gmmio_file=$D/mmio.txt -gtrace_file=$D/rtl.txt -gfirst_idx=0 -girq_file=$D/irq.txt -girqat_file=$D/irqat.txt -gsolo_ev_file=$D/solo_ev.txt -gmax_instr=$N --ieee-asserts=disable 2>&1 | grep -iE "error|fail|warning|done:" | head -${SHOW:-12}
+$B/tb_cpu -gsnap_dir=$D -gmmio_file=$D/mmio.txt -gtrace_file=$D/rtl.txt -gfirst_idx=0 -girq_file=$D/irq.txt -girqat_file=$D/irqat.txt -gsolo_ev_file=$D/solo_ev.txt -gmax_instr=$N ${TB_EXTRA} --ieee-asserts=disable 2>&1 | grep -iE "error|fail|warning|done:" | head -${SHOW:-12}
 python3 -I ../compare.py $D/ref.txt.gz $D/rtl.txt --snap $D/ss.txt

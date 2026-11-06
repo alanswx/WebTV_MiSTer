@@ -103,7 +103,7 @@ architecture arch of webtv_uart16550 is
 
 begin
 
-   handles    <= '1' when bus_addr(31 downto 5) = x"1E00000" & "000" else '0';
+   handles    <= '1' when bus_addr(31 downto 5) = to_unsigned(16#1E000000# / 32, 27) else '0';
    irq_level  <= irq;
    mcr_out    <= mcr;
    txFull     <= '1' when txCount >= 1536 else '0';

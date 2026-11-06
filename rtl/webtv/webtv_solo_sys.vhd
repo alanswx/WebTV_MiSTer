@@ -45,6 +45,8 @@ entity webtv_solo_sys is
       clk1x         : in  std_logic;
       clk93         : in  std_logic;
       reset         : in  std_logic;                       -- clk1x
+      cold_reset    : in  std_logic := '0';                -- power-on / front-panel reset: back to the
+                                                           -- power-up state (JS Solo.reset(), resetCause 1)
 
       bus_addr      : in  unsigned(15 downto 0);
       bus_read      : in  std_logic;
@@ -172,6 +174,11 @@ architecture arch of webtv_solo_sys is
       return '0';
    end function;
 
+   signal rRead, rWrite : std_logic := '0';
+   signal rAddr  : unsigned(15 downto 0) := (others => '0');
+   signal rBe    : std_logic_vector(3 downto 0) := (others => '0');
+   signal rData  : std_logic_vector(31 downto 0) := (others => '0');
+
    function handled(a : unsigned(15 downto 0); wr : std_logic) return std_logic is
       variable o : integer;
    begin
@@ -190,6 +197,18 @@ architecture arch of webtv_solo_sys is
 begin
 
    handles  <= handled(bus_addr, bus_write);
+
+   -- requests are registered once (timing: the register decode starts from flip-flops)
+   process (clk1x)
+   begin
+      if rising_edge(clk1x) then
+         rRead  <= bus_read;
+         rWrite <= bus_write;
+         rAddr  <= bus_addr;
+         rBe    <= bus_be;
+         rData  <= bus_dataWrite;
+      end if;
+   end process;
    led      <= ledR;
    gpio_out <= gpioOutR;
    gpio_en  <= gpioEnR;
@@ -267,17 +286,17 @@ begin
             rxCount <= rxCount + 1;
          end if;
 
-         o := to_integer(bus_addr(11 downto 0));
-         v := bus_dataWrite;
+         o := to_integer(rAddr(11 downto 0));
+         v := rData;
          for b in 0 to 3 loop
-            if (bus_be(b) = '0') then v(8 * b + 7 downto 8 * b) := x"00"; end if;
+            if (rBe(b) = '0') then v(8 * b + 7 downto 8 * b) := x"00"; end if;
          end loop;
 
          ------------------------------------------------ reads
-         if (bus_read = '1') then
+         if (rRead = '1') then
             bus_done <= '1';
             r := (others => '0');
-            case to_integer(bus_addr(15 downto 12)) is
+            case to_integer(rAddr(15 downto 12)) is
                when 16#0# =>
                   case o is
                      when 16#000# => r := CHIP_ID;
@@ -385,9 +404,9 @@ begin
          end if;
 
          ------------------------------------------------ writes
-         if (bus_write = '1') then
+         if (rWrite = '1') then
             bus_done <= '1';
-            case to_integer(bus_addr(15 downto 12)) is
+            case to_integer(rAddr(15 downto 12)) is
                when 16#0# =>
                   case o is
                      when 16#004# =>
@@ -534,6 +553,30 @@ begin
          end if;
 
          ------------------------------------------------ raw state load / force (snapshots, testbench)
+         if (cold_reset = '1') then
+            chpcntl <= x"0001ffff"; wdEnable <= '0'; wdValue <= (others => '0');
+            busEn <= (others => '0'); busStatSoft <= (others => '0');
+            errStat <= (others => '0'); errEn <= (others => '0');
+            fence <= (others => (others => '0')); lowRW <= (others => (others => '0'));
+            jfence <= (others => (others => '0'));
+            tcompare <= (others => '0'); tarmed <= '0';
+            gpioStat <= (others => '0'); gpioEnI <= (others => '0'); gpioPol <= (others => '0');
+            audStat <= (others => '0'); audEn <= (others => '0');
+            devStat <= (others => '0'); devEn <= (others => '0');
+            vidStat <= (others => '0'); vidEn <= (others => '0');
+            rioStat <= (others => '0'); rioEn <= (others => '0'); rioPol <= (others => '0');
+            timStat <= (others => '0'); timEn <= (others => '0');
+            resetCause <= x"00000001";
+            bootMode <= (others => '0'); useBootMode <= (others => '0');
+            modem7e <= '0';
+            romCntl0 <= (others => '0'); romCntl1 <= (others => '0');
+            memRegs <= (x"00000003", x"00000400", x"00000000", x"00000000", x"adbadffa");
+            ledR <= (others => '1'); nvCntl <= (others => '0');
+            gpioOutR <= (others => '0'); gpioEnR <= (others => '0');
+            idCntl <= '0'; idState <= SSID_IDLE;
+            rxWr <= (others => '0'); rxRd <= (others => '0'); rxCount <= (others => '0');
+         end if;
+
          if (init_we = '1') then
             v := init_data;
             case to_integer(init_addr) is

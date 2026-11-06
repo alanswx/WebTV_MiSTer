@@ -67,10 +67,10 @@ architecture arch of webtv_ir is
    -- transmitter
    signal sending   : std_logic := '0';
    signal pkt       : std_logic_vector(21 downto 0) := (others => '0');
-   signal bitIdx    : integer range 0 to 22 := 0;
+   signal bitIdx    : integer range 0 to 21 := 0;
    signal runLevel  : std_logic := '0';
    signal runTicks  : integer range 0 to 4095 := 0;   -- length of the run being sent
-   signal runLeft   : integer range 0 to 4095 := 0;   -- ticks until it ends
+   signal bitLeft   : integer range 0 to 63 := 0;     -- ticks until the current bit ends
    signal hasTail   : std_logic := '0';               -- the last run, held open as the idle line
    signal tailLevel : std_logic := '0';
    signal tailTicks : integer range 0 to 4095 := 0;
@@ -99,18 +99,6 @@ architecture arch of webtv_ir is
       d(9)            := oddParity(d(10 downto 0));   -- odd parity of bits 0..10 (bit 9 still 0)
       d(20)           := oddParity(d(21 downto 11));
       return d;
-   end function;
-
-   -- ticks of the run of equal bits starting at bit i
-   function runLen(d : std_logic_vector(21 downto 0); i : integer) return integer is
-      variable n : integer := 0;
-   begin
-      for k in 0 to 21 loop
-         if k >= i then
-            if d(k) = d(i) and n = (k - i) * BIT_TICKS then n := n + BIT_TICKS; end if;
-         end if;
-      end loop;
-      return n;
    end function;
 
 begin
@@ -162,25 +150,26 @@ begin
                end if;
             end if;
             if (sending = '1') then
-               if (runLeft <= 1) then
-                  -- the run ends
-                  n := bitIdx + runTicks / BIT_TICKS;
-                  if (n >= 22) then
+               if (bitLeft <= 1) then
+                  -- a bit ends: the run goes on with an equal bit, or ends
+                  bitLeft <= BIT_TICKS;
+                  if (bitIdx < 21) then bitIdx <= bitIdx + 1; end if;
+                  if (bitIdx = 21) then
                      -- last run of the packet: it stays open as the idle line
                      sending   <= '0';
                      hasTail   <= '1';
                      tailLevel <= runLevel;
                      tailTicks <= runTicks;
                      gap       <= 0;
+                  elsif (pkt(bitIdx + 1) = runLevel) then
+                     runTicks <= runTicks + BIT_TICKS;
                   else
                      pushRun := true; pushVal := runLevel & std_logic_vector(to_unsigned(runTicks, 11));
-                     bitIdx   <= n;
-                     runLevel <= pkt(n);
-                     runTicks <= runLen(pkt, n);
-                     runLeft  <= runLen(pkt, n);
+                     runLevel <= pkt(bitIdx + 1);
+                     runTicks <= BIT_TICKS;
                   end if;
                else
-                  runLeft <= runLeft - 1;
+                  bitLeft <= bitLeft - 1;
                end if;
             elsif (evWr /= evRd and gap = IDLE_TICKS and not (hasTail = '1' and tailTicks + 1 >= MAX_TICKS)) then
                -- next packet: its first edge ends the idle line
@@ -195,8 +184,8 @@ begin
                sending  <= '1';
                bitIdx   <= 0;
                runLevel <= p(0);
-               runTicks <= runLen(p, 0);
-               runLeft  <= runLen(p, 0);
+               runTicks <= BIT_TICKS;
+               bitLeft  <= BIT_TICKS;
             end if;
          end if;
 

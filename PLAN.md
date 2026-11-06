@@ -231,7 +231,35 @@ ops / received bytes / carrier changes, every read value and the interrupt line 
 "Serial port" picks the debug console (default) or the modem line on the UART pins (to the HPS, where the AT/PPP
 side has to run; carrier detect = HPS DTR via UART_DSR). Lock-step: replayed like the IR.
 
+Hardware bring-up (2026-11-06, mister192, Quartus 17.0 Lite on misterubuntu):
+- Builds and fits (62% ALMs, 85/112 DSP after replacing div255 / yexp / blend multiplies; IIC memories moved to
+  block RAM; renderer pixel path now a 6-stage pipeline, cel setup and geometry split over states).
+- Timing: at 62.5/93.75/125 MHz the CPU misses by ~2 ns (forwarding -> stall paths in the N64-derived pipeline;
+  seeds don't help). A WEBTV_SLOW build (qsf VERILOG_MACRO, PLL 50/75/100 MHz) meets timing and is what boots.
+- Bring-up tools: OSD "Debug overlay" (bit boxes: status, sticky errors, instruction count, PC, debug-serial
+  count, frames, LED, IDE state, boot-ROM exception dump), a branch trace (last 1024 non-sequential PCs) frozen on
+  the boot ROM's exception vector and dumped to DDR3 0x30FA0000, RAM / framebuffer readable from Linux through
+  /dev/mem mmap at 0x30000000, debug serial captured on the HPS /dev/ttyS1, MGL to load core + disk image.
+- Bugs found on hardware (none visible in lock-step, which starts from JS snapshots):
+  1. 16550 address decode compared slices of different lengths (always false).
+  2. R4640 Config was loaded into the wrong half of SS slot 16, and mtc0 could overwrite the cache geometry
+     (now read-only outside lock-step): the ROM sized its cache flushes for 4 KB.
+  3. CPU write FIFO 8 deep could overflow with 4-beat D-cache writebacks (now 16).
+  4. mtc0 Status (CU1) followed by ctc1 one instruction later trapped "FPU unusable": the decode-stage CU1
+     check now forwards a Status write in flight (the OS entry code does exactly this).
+  5. IDE: MiSTer mounts the image after the core starts and hps_io delivers img_size after img_mounted: the
+     drive now follows img_size after a mount and comes up ready; the CPU start waits up to 3 s for a mount.
+  6. "Spurious interrupt": the CPU commits to an interrupt at decode and keeps it after the line drops (the OS
+     IDE driver polls status, which clears the drive's interrupt, right after a command). Outside lock-step the
+     RIO status bits now stay latched until software clears them (as the chip does).
+  7. SOLO state now goes back to power-up on an OSD/power reset (cold_reset); the debug TX FIFO is 1 KB.
+- Status: the boot ROM loads the browser image from the disk, the disk OS boots (FAT volumes, tasks, NV memory,
+  TellyScript). It stops at TellyScript's modem handshake ("Watchpup fired"): nothing answers on the modem
+  UART. JS answers there with its Modem class (AT commands, TellyScript "NULL loader" download).
+
 Next:
+- Modem side: answer TellyScript / AT commands (Linux-side bridge on the HPS UART, or a minimal responder).
+- CPU timing at 93.75 MHz (forwarding/stall paths) so the full-speed build can be used.
 - Quartus build (needs a machine with Quartus 17): fit/timing; expect work on the renderer's blend path and the
   CPU at 93.75 MHz (the N64 core's CPU met timing there).
 - Linux side of the modem: AT commands + PPP + gateway on the HPS (webtv-bridge pico/src modem.c/ppp.c/gw.c or

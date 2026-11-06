@@ -18,13 +18,13 @@ for f in functions export divider cpu_FPU_sqrt cpu_FPU cpu_TLB_instr cpu_TLB_dat
 done
 $G cpu_mul_sim.vhd
 $G $R/cpu.vhd
+$G ../../rtl/webtv/webtv_sdpram.vhd
 $G ../../rtl/webtv/webtv_bustick.vhd
 $G ../../rtl/webtv/webtv_ddr3mux.vhd
 $G ../../rtl/webtv/webtv_memmux.vhd
 $G ../../rtl/webtv/webtv_solo_sys.vhd
 $G ../../rtl/webtv/webtv_iic.vhd
 $G ../../rtl/webtv/webtv_solo_vid.vhd
-$G ../../rtl/webtv/webtv_sdpram.vhd
 $G ../../rtl/webtv/webtv_gfx_render.vhd
 $G ../../rtl/webtv/webtv_ide.vhd
 $G ../../rtl/webtv/webtv_ir.vhd

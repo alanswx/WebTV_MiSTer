@@ -17,6 +17,7 @@ entity tb_mister is
       ram_bytes    : integer := 65536;     -- RAM cleared by the glue (the full 8 MB takes long in sim)
       run_us       : integer := 20000;     -- simulated time after the CPU starts
       fast_load    : boolean := false;     -- put the ROM into the DDR3 model directly, download only 64 bytes
+      reset_at_us  : integer := 0;         -- pulse the OSD reset this long after the CPU starts (0: never)
       ddr3_latency : integer := 12
    );
 end entity;
@@ -57,7 +58,7 @@ begin
    clk2x <= not clk2x after 12 ns;
 
    idut : entity work.webtv_mister
-   generic map (RAM_BYTES => ram_bytes)
+   generic map (RAM_BYTES => ram_bytes, DISK_WAIT_MS => 0)
    port map (
       clk1x => clk1x, clk93 => clk93, clk2x => clk2x, pll_locked => locked, reset => reset,
       autoboot_y => '1',
@@ -134,7 +135,19 @@ begin
       report "RAM clear check: " & integer'image(bad) & " bad words";
       report "CPU running";
 
+      if reset_at_us > 0 then
+         wait for reset_at_us * 1 us;
+         report "OSD reset";
+         wait until rising_edge(clk1x); reset <= '1';
+         for k in 0 to 9 loop wait until rising_edge(clk1x); end loop;
+         reset <= '0';
+         wait until running = '0';
+         wait until running = '1';
+         report "CPU running again";
+      end if;
       wait for run_us * 1 us;
+      report "trace dump marker: " & to_hstring(mem(16#FA2000# / 8)) & " first entries " &
+             to_hstring(mem(16#FA0000# / 8)) & " " & to_hstring(mem(16#FA0000# / 8 + 1023));
       report "end: " & integer'image(frames) & " frames, fb_en " & std_logic'image(fb_en) &
              ", fb_base " & to_hstring(fb_base) & ", errors " & to_hstring(errors);
       std.env.finish;
@@ -162,8 +175,7 @@ begin
       end loop;
       assert uart_txd = '1' report "UART: bad stop bit" severity error;
       if b = x"0A" then
-         report "[uart] " & l.all;
-         deallocate(l);
+         if l /= null then report "[uart] " & l.all; deallocate(l); else report "[uart] "; end if;
       elsif b /= x"0D" then
          write(l, character'val(to_integer(unsigned(b))));
       end if;

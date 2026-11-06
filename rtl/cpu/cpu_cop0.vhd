@@ -765,7 +765,13 @@ begin
                         when 14 => COP0_14_EPC <= writeValue;
                         
                         when 16 => -- WebTV: R4640 Config (cacheability comes from CAlg)
-                           R4640_CONFIG <= writeValue(31 downto 0);
+                           -- only K0 and CU are writable; the cache geometry (IC/DC/IB/DB) is read-only,
+                           -- as on the chip. Lock-step runs keep the JS model's write-everything.
+                           if (LOCKSTEP_COUNT = '1') then
+                              R4640_CONFIG <= writeValue(31 downto 0);
+                           else
+                              R4640_CONFIG(3 downto 0) <= writeValue(3 downto 0);
+                           end if;
                      
                         when 17 => R4640_CALG   <= writeValue(31 downto 0); -- WebTV: R4640 CAlg
                         when 18 => R4640_IWATCH <= writeValue(31 downto 0); -- WebTV: R4640 IWatch

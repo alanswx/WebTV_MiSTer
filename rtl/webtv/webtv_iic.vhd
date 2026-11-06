@@ -43,8 +43,12 @@ architecture arch of webtv_iic is
    constant S_SACK  : integer := 5;
    constant S_NACK  : integer := 6;
 
-   type tMem is array(0 to 1151) of std_logic_vector(7 downto 0);
-   signal mem : tMem := (others => (others => '0'));
+   -- device memories (block RAM): read address = the selected device's pointer, data one cycle later
+   signal memWe  : std_logic := '0';
+   signal memWA  : unsigned(10 downto 0) := (others => '0');
+   signal memWD  : std_logic_vector(7 downto 0) := (others => '0');
+   signal memRA  : unsigned(10 downto 0);
+   signal memQ   : std_logic_vector(7 downto 0);
 
    type tPtr is array(1 to 5) of unsigned(7 downto 0);
    signal ptr    : tPtr := (others => (others => '0'));
@@ -77,11 +81,16 @@ architecture arch of webtv_iic is
 
    function memIndex(d : integer; p : unsigned(7 downto 0)) return integer is
    begin
-      if d = 1 then return to_integer(p(6 downto 0)); end if;
+      if d <= 1 then return to_integer(p(6 downto 0)); end if;
       return 128 + (d - 2) * 256 + to_integer(p);
    end function;
 
 begin
+
+   imem : entity work.webtv_sdpram
+   generic map (WIDTH => 8, AW => 11)
+   port map (clk => clk1x, we => memWe, waddr => memWA, wdata => memWD, raddr => memRA, q => memQ);
+   memRA <= to_unsigned(memIndex(dev, ptr(dev)), 11) when dev /= 0 else (others => '0');
 
    sclNew  <= iic_cntl(3) when iic_cntl(4) = '1' else '1';
    sdaNew  <= iic_cntl(1) when iic_cntl(2) = '1' else '1';
@@ -98,7 +107,7 @@ begin
       procedure loadRead is
       begin
          p  := ptr(dev);
-         ob := mem(memIndex(dev, p));
+         ob := memQ;                     -- mem(memIndex(dev, ptr(dev))), set up long before
          if dev = 1 then ptr(dev) <= '0' & (p(6 downto 0) + 1); else ptr(dev) <= p + 1; end if;
          outByte <= ob;
          nbits   <= 0;
@@ -107,6 +116,7 @@ begin
       end procedure;
    begin
       if rising_edge(clk1x) then
+         memWe <= '0';
 
          if (sclNew /= scl or sdaNew /= sdaM) then
             scl  <= sclNew;
@@ -157,7 +167,9 @@ begin
                            gotPtr(dev) <= '1';
                         else
                            p := ptr(dev);
-                           mem(memIndex(dev, p)) <= bits;
+                           memWe <= '1';
+                           memWA <= to_unsigned(memIndex(dev, p), 11);
+                           memWD <= bits;
                            if dev = 1 then ptr(dev) <= '0' & p(6 downto 3) & (p(2 downto 0) + 1);   -- page wrap
                            else ptr(dev) <= p + 1; end if;
                         end if;
@@ -207,7 +219,9 @@ begin
                ptr(to_integer(init_addr(2 downto 0)))    <= unsigned(init_data(7 downto 0));
                gotPtr(to_integer(init_addr(2 downto 0))) <= init_data(8);
             elsif (init_addr >= x"1000" and init_addr < x"1480") then
-               mem(to_integer(init_addr(10 downto 0))) <= init_data(7 downto 0);
+               memWe <= '1';
+               memWA <= init_addr(10 downto 0);
+               memWD <= init_data(7 downto 0);
             end if;
          end if;
 

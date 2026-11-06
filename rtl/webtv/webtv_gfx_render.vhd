@@ -116,23 +116,36 @@ architecture arch of webtv_gfx_render is
    end function;
 
    -- ((y - 16) * 256 + 128) / 219, truncated toward zero
-   function yexp(y : integer) return integer is
+   function yexpCalc(y : integer) return integer is
       variable n : integer;
    begin
       n := (y - 16) * 256 + 128;
       if n >= 0 then return n / 219; end if;
       return -((-n) / 219);
    end function;
+   type tYexp is array(0 to 511) of integer range -32 to 600;
+   function yexpInit return tYexp is
+      variable t : tYexp;
+   begin
+      for i in 0 to 511 loop t(i) := yexpCalc(i); end loop;
+      return t;
+   end function;
+   constant YEXP_TABLE : tYexp := yexpInit;
+   -- (a table: no divider in the pixel path; y is 0..287)
+   function yexp(y : integer) return integer is
+   begin
+      return YEXP_TABLE(y mod 512);
+   end function;
 
-   -- n / 255 truncated toward zero, |n| < 2^19 (exact: (|n| * 0x80809) >> 27)
+   -- n / 255 truncated toward zero, |n| < 2^19: exact as ((|n| + 1) * 0x10101) >> 24 (shifts and adds)
    function div255(n : integer) return integer is
       variable a : unsigned(19 downto 0);
       variable p : unsigned(39 downto 0);
       variable q : integer;
    begin
-      if n >= 0 then a := to_unsigned(n, 20); else a := to_unsigned(-n, 20); end if;
-      p := a * to_unsigned(16#80809#, 20);
-      q := to_integer(p(39 downto 27));
+      if n >= 0 then a := to_unsigned(n + 1, 20); else a := to_unsigned(1 - n, 20); end if;
+      p := shift_left(resize(a, 40), 16) + shift_left(resize(a, 40), 8) + resize(a, 40);
+      q := to_integer(p(39 downto 24));
       if n >= 0 then return q; end if;
       return -q;
    end function;
@@ -159,7 +172,12 @@ architecture arch of webtv_gfx_render is
    -- big-endian byte n (0..3) of a word
    function wbyte(w : word; n : integer) return integer is
    begin
-      return to_integer(unsigned(w(31 - 8 * n downto 24 - 8 * n)));
+      case n is
+         when 0      => return to_integer(unsigned(w(31 downto 24)));
+         when 1      => return to_integer(unsigned(w(23 downto 16)));
+         when 2      => return to_integer(unsigned(w(15 downto 8)));
+         when others => return to_integer(unsigned(w(7 downto 0)));
+      end case;
    end function;
 
    ------------------------------------------------------------------ cel table
@@ -210,7 +228,7 @@ architecture arch of webtv_gfx_render is
    signal capCnt    : unsigned(1 downto 0) := (others => '0');
 
    ------------------------------------------------------------------ state
-   type tState is (IDLE, GEOM,
+   type tState is (IDLE, GEOM, GEOM2, SETUP_B, SETUP_C, SETUP_D, SETUP_E,
                    B_YM, B_YM_W, B_CELW, B_CELW_W, B_CELDONE, B_CELSTORE, B_CELNEXT,
                    ROW_START, ROW_VID, ROW_VID_PIX, ROW_CEL, ROW_CEL_LOAD, ROW_CEL_SETUP,
                    PIX_FETCH, PIX_FETCH2, PIX_CB0, PIX_CB1, PIX_DRAW1,
@@ -263,6 +281,41 @@ architecture arch of webtv_gfx_render is
    signal pa0, pa1  : integer range 0 to 255 := 0;  -- alpha for each pixel (0 = skip)
    signal pdo0, pdo1 : std_logic := '0';           -- pixel present
 
+   -- pixel pipeline (one pair a cycle, fixed latency): S1 texel words -> S2 Y/Cb/Cr/alpha ->
+   -- S3 Cr/Cb products -> S4 RGB (+ background read) -> S5 blend products -> line buffer
+   type tInt2 is array(0 to 1) of integer range -1024 to 1023;
+   type tA2   is array(0 to 1) of integer range 0 to 255;
+   type tRGB2 is array(0 to 1) of tRGB;
+   type tP3   is array(0 to 5) of integer range -262144 to 262143;
+   signal p1v, p2v, p3v, p4v, p5v : std_logic := '0';
+   signal p1kind    : integer range 0 to 2 := 0;     -- 1: 4:2:2 word, 2: two 4:4:4 words
+   signal p1w0, p1w1 : word := (others => '0');
+   signal p1ga      : integer range 0 to 255 := 255;
+   signal p1x, p2x, p3x, p4x, p5x : integer range 0 to 1023 := 0;
+   signal p1one, p2one, p3one, p4one, p5one : std_logic := '0';
+   signal p2ye, p2cb, p2cr, p3ye, p3rr, p3bb : tInt2 := (others => 0);
+   signal p2a, p3a, p4a, p5a : tA2 := (others => 0);
+   signal p4c, p5c  : tRGB2 := (others => (0, 0, 0));
+   signal p5pr, p5pb : tP3 := (others => 0);
+   signal pipeBusy  : std_logic;
+
+   -- cel setup stages
+   signal sYy, sCr, sCb, sRr, sBb : integer range -1024 to 1023 := 0;
+   signal sYoff     : integer range -2048 to 2047 := 0;
+   signal sDuRaw    : signed(15 downto 0) := (others => '0');
+   signal sUu, sVv, sXl, sXr : signed(31 downto 0) := (others => '0');
+   signal sClipN    : integer range 0 to 4095 := 0;
+   -- texel coordinates, registered from u / v (two cycles after a change of u / v)
+   signal muR, mvR  : integer range -128 to 127 := 0;
+   -- pipeline: background flag / default for S4, final values for S6
+   type tBg2 is array(0 to 1) of std_logic_vector(23 downto 0);
+   signal p4flag    : std_logic_vector(0 to 1) := "00";
+   signal p4dflt    : tBg2 := (others => (others => '0'));
+   signal p6v       : std_logic := '0';
+   signal p6x       : integer range 0 to 1023 := 0;
+   signal p6a       : tA2 := (others => 0);
+   signal p6c       : tRGB2 := (others => (0, 0, 0));
+
    -- memory word read
    signal rdAddr    : unsigned(31 downto 0) := (others => '0');
    signal rdData    : word := (others => '0');
@@ -277,8 +330,10 @@ begin
    celRA <= to_unsigned(ce * 16 + ldIdx, 12) when ce < MAX_CELS else (others => '0');
 
    -- composer read address per bank for the pixel pair at x: (x+1)/2 in bank 0, x/2 in bank 1
-   cAddr(0) <= to_unsigned((x + 1) / 2, 9) when (x >= 0 and x < SCREEN_W) else (others => '0');
-   cAddr(1) <= to_unsigned(x / 2, 9) when (x >= 0 and x < SCREEN_W) else (others => '0');
+   -- background read for the pair in S3 (data in S4): pixel p3x+k sits in bank (p3x+k) mod 2
+   cAddr(0) <= to_unsigned((p3x + 1) / 2, 9) when (p3x < SCREEN_W) else (others => '0');
+   cAddr(1) <= to_unsigned(p3x / 2, 9) when (p3x < SCREEN_W) else (others => '0');
+   pipeBusy <= p1v or p2v or p3v or p4v or p5v or p6v;
 
    glb_buf : for b in 0 to 1 generate
       glb_bank : for k in 0 to 1 generate
@@ -318,6 +373,8 @@ begin
       variable a32 : unsigned(31 downto 0);
       variable mu, mv : integer;
       variable idx : signed(31 downto 0);
+      variable rowb : signed(31 downto 0);
+      variable bm, bc : integer;
       variable beat : std_logic_vector(63 downto 0);
       variable ci  : integer range 0 to 63;
       variable w   : word;
@@ -383,6 +440,7 @@ begin
          lbWe0         <= '0';
          lbWe1         <= '0';
          lbWBuf        <= sel;
+         p1v           <= '0';
 
          case state is
 
@@ -418,15 +476,20 @@ begin
                   a32 := a32 + to_unsigned(4 * hs, 32);
                   vs  := vs - 2;
                end if;
+               gHsize  <= hs; gVsize <= vs;
+               gNstart <= a32;
+               vaddr   <= a32;
+               state   <= GEOM2;
+
+            when GEOM2 =>
+               hs  := gHsize; vs := gVsize;
                hst := to_integer(signed(pot_hstart(15 downto 0))) - 16#77#;
                if hst < 2 then hst := 2; end if;
                vst := to_integer(signed(pot_vstart(15 downto 0))) - 16#23#;
                if vst < 2 then vst := 2; end if;
                if hst + hs > SCREEN_W then hst := SCREEN_W - hs; end if;
                if vst + vs > SCREEN_H then vst := SCREEN_H - vs; end if;
-               gHstart <= hst; gHsize <= hs; gVstart <= vst; gVsize <= vs;
-               gNstart <= a32;
-               vaddr   <= a32;
+               gHstart <= hst; gVstart <= vst;
                gGfx    <= pot_cntl(3);
                if (pot_cntl(3) = '1') then
                   gEn   <= pot_cntl(0) and gfx_cntl(7);
@@ -577,10 +640,9 @@ begin
 
             when ROW_VID_PIX =>
                px := (gHstart / 2) * 2 + x;
-               pix422(rdData, true, c, a);
-               if a /= 0 and px < SCREEN_W then lbPut(px, clamp8(c.r) & clamp8(c.g) & clamp8(c.b)); end if;
-               pix422(rdData, false, c, a);
-               if a /= 0 and px + 1 < SCREEN_W then lbPut(px + 1, clamp8(c.r) & clamp8(c.g) & clamp8(c.b)); end if;
+               if (px < SCREEN_W) then
+                  p1v <= '1'; p1kind <= 1; p1w0 <= rdData; p1x <= px; p1one <= '0'; p1ga <= 255;
+               end if;
                x     <= x + 2;
                state <= ROW_VID;
 
@@ -623,62 +685,81 @@ begin
                   cDvx       <= resize(signed(cw(9)(15 downto 0)), 32);
                   cUmask     <= cw(10)(31 downto 24);
                   cVmask     <= cw(10)(23 downto 16);
-                  -- alpha type 3 blend colour
-                  yy := yexp(to_integer(unsigned(cw(11)(23 downto 16))) + 32);   -- (yBlend + Y_BLACK): yexp subtracts 16
-                  cr := to_integer(signed(cw(11)(7 downto 0)));
-                  cb := to_integer(signed(cw(11)(15 downto 8)));
-                  rr := yy + to_integer(shift_right(to_signed(16#166# * cr + 128, 32), 8));
-                  bb := yy - to_integer(shift_right(to_signed(16#1C7# * cb + 128, 32), 8));
-                  gg := yy + to_integer(shift_right(to_signed(16#32# * bb + 16#83# * rr + 128, 32), 8));
-                  cBlend <= (rr, gg, bb);
-                  -- row start values
-                  uu := resize(signed(cw(4)(31 downto 16)), 32) + to_signed(yoff, 16) * signed(cw(4)(15 downto 0));
-                  vv := resize(signed(cw(6)(31 downto 16)), 32) + to_signed(yoff, 16) * signed(cw(6)(15 downto 0));
-                  xl := s10(cw(0)(9 downto 0)) * 1024 + to_integer(unsigned(cw(7)(29 downto 20)));
-                  xl := truncZ10(to_signed(xl, 32) + to_signed(yoff, 12) * signed(cw(7)(19 downto 0)));
-                  xr := s10(cw(2)(9 downto 0)) * 1024 + to_integer(unsigned(cw(8)(29 downto 20)));
-                  xr := truncZ10(to_signed(xr, 32) + to_signed(yoff, 12) * signed(cw(8)(19 downto 0)));
-                  xs  := gHstart + gHsize / 2 + xl;
-                  xen := gHsize / 2 + xr;
-                  if xen > gHsize then xen := gHsize; end if;
-                  xen := gHstart + xen;
-                  if (xs < gHstart) then
-                     n  := gHstart - xs;
-                     uu := uu + resize(signed(duxRaw), 16) * to_signed(n, 16);
-                     vv := vv + signed(cw(9)(15 downto 0)) * to_signed(n, 16);
-                     xs := gHstart;
-                  end if;
-                  u <= uu; v <= vv;
-                  x <= xs; xe <= xen;
-                  if (xs >= xen) then
-                     state <= ROW_CEL;
-                  else
-                     if (xs + 1 = xen) then one <= '1'; else one <= '0'; end if;
-                     state <= PIX_FETCH;
-                  end if;
+                  -- alpha type 3 blend colour, stage 1
+                  sYy <= yexp(to_integer(unsigned(cw(11)(23 downto 16))) + 32);   -- (yBlend + Y_BLACK): yexp subtracts 16
+                  sCr <= to_integer(signed(cw(11)(7 downto 0)));
+                  sCb <= to_integer(signed(cw(11)(15 downto 8)));
+                  sYoff  <= yoff;
+                  sDuRaw <= signed(duxRaw);
+                  state  <= SETUP_B;
                end if;
+
+            when SETUP_B =>
+               -- row start values (products), edges before truncation, blend stage 2
+               sUu <= resize(signed(cw(4)(31 downto 16)), 32) + to_signed(sYoff, 16) * signed(cw(4)(15 downto 0));
+               sVv <= resize(signed(cw(6)(31 downto 16)), 32) + to_signed(sYoff, 16) * signed(cw(6)(15 downto 0));
+               xl := s10(cw(0)(9 downto 0)) * 1024 + to_integer(unsigned(cw(7)(29 downto 20)));
+               sXl <= to_signed(xl, 32) + to_signed(sYoff, 12) * signed(cw(7)(19 downto 0));
+               xr := s10(cw(2)(9 downto 0)) * 1024 + to_integer(unsigned(cw(8)(29 downto 20)));
+               sXr <= to_signed(xr, 32) + to_signed(sYoff, 12) * signed(cw(8)(19 downto 0));
+               sRr <= sYy + to_integer(shift_right(to_signed(16#166# * sCr + 128, 32), 8));
+               sBb <= sYy - to_integer(shift_right(to_signed(16#1C7# * sCb + 128, 32), 8));
+               state <= SETUP_C;
+
+            when SETUP_C =>
+               xl  := truncZ10(sXl);
+               xr  := truncZ10(sXr);
+               xs  := gHstart + gHsize / 2 + xl;
+               xen := gHsize / 2 + xr;
+               if xen > gHsize then xen := gHsize; end if;
+               xen := gHstart + xen;
+               if (xs < gHstart) then
+                  sClipN <= gHstart - xs;
+                  xs := gHstart;
+               else
+                  sClipN <= 0;
+               end if;
+               x  <= xs; xe <= xen;
+               gg := sYy + to_integer(shift_right(to_signed(16#32# * sBb + 16#83# * sRr + 128, 32), 8));
+               cBlend <= (sRr, gg, sBb);
+               state <= SETUP_D;
+
+            when SETUP_D =>
+               -- clipped at the window's left edge: advance u, v by the skipped pixels
+               u <= sUu + resize(sDuRaw, 16) * to_signed(sClipN, 16);
+               v <= sVv + signed(cw(9)(15 downto 0)) * to_signed(sClipN, 16);
+               if (x >= xe) then
+                  state <= ROW_CEL;
+               else
+                  if (x + 1 = xe) then one <= '1'; else one <= '0'; end if;
+                  state <= SETUP_E;
+               end if;
+
+            when SETUP_E =>
+               state <= PIX_FETCH;             -- muR / mvR follow the new u, v
 
             -- texel fetches (each through RD_WORD)
             when PIX_FETCH =>
-               mu := maskedTrunc(u, cUmask);
-               mv := maskedTrunc(v, cVmask);
+               mu := muR;
+               mv := mvR;
+               rowb := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20);
                case cTex is
                   when 1 | 4 | 5 =>
-                     idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(mu * 2, 32);
+                     idx := rowb + to_signed(mu * 2, 32);
                      u <= u + shift_left(cDux, 1); v <= v + shift_left(cDvx, 1);
                      rdAddr <= unsigned(idx); ret <= PIX_DRAW1; state <= RD_WORD;
                   when 3 =>
-                     idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(mu * 4, 32);
+                     idx := rowb + to_signed(mu * 4, 32);
                      u <= u + cDux; v <= v + cDvx;
                      rdAddr <= unsigned(idx); ret <= PIX_FETCH2; state <= RD_WORD;
                   when 2 =>
-                     idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(mu, 32);
+                     idx := rowb + to_signed(mu, 32);
                      fetchSel <= to_integer(unsigned(idx(1 downto 0)));
                      u <= u + cDux; v <= v + cDvx;
                      rdAddr <= unsigned(idx); ret <= PIX_FETCH2; state <= RD_WORD;
                   when 7 =>
                      if mu >= 0 then k := mu / 2; else k := -((-mu) / 2); end if;
-                     idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(k, 32);
+                     idx := rowb + to_signed(k, 32);
                      fetchSel <= to_integer(unsigned(idx(1 downto 0)));
                      u <= u + cDux; v <= v + cDvx;
                      rdAddr <= unsigned(idx); ret <= PIX_CB0; state <= RD_WORD;
@@ -690,13 +771,14 @@ begin
             when PIX_FETCH2 =>
                -- second texel (3: direct 4:4:4, 2: VQ8 index)
                tw0 <= rdData;
-               mu := maskedTrunc(u, cUmask);
-               mv := maskedTrunc(v, cVmask);
+               mu := muR;
+               mv := mvR;
+               rowb := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20);
                if (cTex = 3) then
-                  idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(mu * 4, 32);
+                  idx := rowb + to_signed(mu * 4, 32);
                   ret <= PIX_DRAW1;
                else
-                  idx := signed(cTexBase) + to_signed(mv, 12) * to_signed(cRowBytes, 20) + to_signed(mu, 32);
+                  idx := rowb + to_signed(mu, 32);
                   fetchSel2 <= to_integer(unsigned(idx(1 downto 0)));
                   ret <= PIX_CB0;
                end if;
@@ -734,50 +816,17 @@ begin
                end if;
 
             when PIX_DRAW1 =>
-               -- compose the pair into the line buffer (drawPixel)
+               -- the pair goes down the pixel pipeline (drawPixel)
                --   1/4/5: rdData = the 4:2:2 word; 3: tw0, rdData = the two 4:4:4 words;
                --   2/7: tw0, rdData = the two codebook entries
-               for p in 0 to 1 loop
-                  if (p = 0 or one = '0') then
-                     a := 0;
-                     case cTex is
-                        when 1 | 4 | 5 =>
-                           pix422(rdData, p = 0, c, a);
-                           if a /= 0 then a := cGA; end if;             -- alpha 255 or global alpha
-                        when 2 | 3 | 7 =>
-                           if p = 0 then pix444(tw0, c, a); else pix444(rdData, c, a); end if;
-                           if a /= 0 and (a = 255 or cGA /= 255) then a := cGA; end if;
-                        when others => null;
-                     end case;
-                     px := x + p;
-                     if a /= 0 and px < SCREEN_W then
-                        if a /= 255 then
-                           bk := px mod 2;
-                           if lbFlags(sel)(px) = '1' then bg := lbQ(sel, bk); else bg := dflt(px, y); end if;
-                           fa := a; ba := 255 - a;
-                           case cAlphaType is
-                              when 0 =>
-                                 c.r := div255(fa * c.r + ba * to_integer(unsigned(bg(23 downto 16))));
-                                 c.g := div255(fa * c.g + ba * to_integer(unsigned(bg(15 downto 8))));
-                                 c.b := div255(fa * c.b + ba * to_integer(unsigned(bg(7 downto 0))));
-                              when 1 =>
-                                 c.r := div255(fa * c.r + fa * to_integer(unsigned(bg(23 downto 16))));
-                                 c.g := div255(fa * c.g + fa * to_integer(unsigned(bg(15 downto 8))));
-                                 c.b := div255(fa * c.b + fa * to_integer(unsigned(bg(7 downto 0))));
-                              when 2 =>
-                                 c.r := div255(fa * c.r);
-                                 c.g := div255(fa * c.g);
-                                 c.b := div255(fa * c.b);
-                              when others =>
-                                 c.r := div255(fa * c.r + ba * cBlend.r);
-                                 c.g := div255(fa * c.g + ba * cBlend.g);
-                                 c.b := div255(fa * c.b + ba * cBlend.b);
-                           end case;
-                        end if;
-                        lbPut(px, clamp8(c.r) & clamp8(c.g) & clamp8(c.b));
-                     end if;
-                  end if;
-               end loop;
+               if (x < SCREEN_W) then
+                  p1v <= '1'; p1x <= x; p1one <= one; p1ga <= cGA;
+                  case cTex is
+                     when 1 | 4 | 5 => p1kind <= 1; p1w0 <= rdData;
+                     when 2 | 3 | 7 => p1kind <= 2; p1w0 <= tw0; p1w1 <= rdData;
+                     when others    => p1kind <= 0;
+                  end case;
+               end if;
                -- next pair
                x <= x + 2;
                if (x + 2 >= xe) then
@@ -789,7 +838,7 @@ begin
 
             ------------------------------------------------ hand the row to the writer
             when ROW_OUT =>
-               if (wBusy = '0') then
+               if (wBusy = '0' and pipeBusy = '0') then
                   -- swap: the composed row goes to the writer, the written-out buffer is the next row
                   sel    <= 1 - sel;
                   lbFlags(1 - sel) <= (others => '0');
@@ -841,6 +890,94 @@ begin
                end if;
 
          end case;
+
+         ------------------------------------------------ pixel pipeline
+         -- S1 -> S2: Y (expanded), Cb, Cr, alpha per pixel
+         p2v <= p1v; p2x <= p1x; p2one <= p1one;
+         for k in 0 to 1 loop
+            if (p1kind = 1) then
+               if k = 0 then n := wbyte(p1w0, 0); else n := wbyte(p1w0, 2); end if;
+               p2ye(k) <= yexp(n);
+               p2cb(k) <= wbyte(p1w0, 1) - 128;
+               p2cr(k) <= wbyte(p1w0, 3) - 128;
+               if (n = 255) then p2a(k) <= 0; else p2a(k) <= p1ga; end if;   -- alpha 255 or global alpha
+            elsif (p1kind = 2) then
+               if k = 0 then w := p1w0; else w := p1w1; end if;
+               p2ye(k) <= yexp(wbyte(w, 0));
+               p2cb(k) <= to_integer(signed(w(23 downto 16)));
+               p2cr(k) <= to_integer(signed(w(7 downto 0)));
+               a := wbyte(w, 2);
+               if (wbyte(w, 0) = 255) then a := 0; end if;
+               if (a /= 0 and (a = 255 or p1ga /= 255)) then a := p1ga; end if;
+               p2a(k) <= a;
+            else
+               p2a(k) <= 0; p2ye(k) <= 0; p2cb(k) <= 0; p2cr(k) <= 0;
+            end if;
+         end loop;
+         if (p1one = '1') then p2a(1) <= 0; end if;
+         -- S2 -> S3: the Cr / Cb products
+         p3v <= p2v; p3x <= p2x; p3one <= p2one; p3ye <= p2ye; p3a <= p2a;
+         for k in 0 to 1 loop
+            p3rr(k) <= to_integer(shift_right(to_signed(16#166# * p2cr(k) + 128, 32), 8));
+            p3bb(k) <= to_integer(shift_right(to_signed(16#1C7# * p2cb(k) + 128, 32), 8));
+         end loop;
+         -- S3 -> S4: RGB (the background read for p3x is issued now: lbQ valid in S4)
+         p4v <= p3v; p4x <= p3x; p4one <= p3one; p4a <= p3a;
+         for k in 0 to 1 loop
+            px := p3x + k;
+            if (px < SCREEN_W) then
+               p4flag(k) <= lbFlags(sel)(px);
+               p4dflt(k) <= dflt(px, y);
+            end if;
+         end loop;
+         for k in 0 to 1 loop
+            n := to_integer(shift_right(to_signed(16#32# * p3bb(k) + 16#83# * p3rr(k) + 128, 32), 8));
+            p4c(k) <= (p3ye(k) + p3rr(k), p3ye(k) - n, p3ye(k) + p3bb(k));
+         end loop;
+         -- S4 -> S5: blend products: fa * c and bm * (background or blend colour)
+         p5v <= p4v; p5x <= p4x; p5one <= p4one; p5a <= p4a; p5c <= p4c;
+         for k in 0 to 1 loop
+            if p4flag(k) = '1' then bg := lbQ(sel, (p4x + k) mod 2); else bg := p4dflt(k); end if;
+            fa := p4a(k); ba := 255 - p4a(k);
+            case cAlphaType is
+               when 0      => bm := ba;
+               when 1      => bm := fa;
+               when 2      => bm := 0;
+               when others => bm := ba;
+            end case;
+            p5pr(3 * k + 0) <= fa * p4c(k).r;
+            p5pr(3 * k + 1) <= fa * p4c(k).g;
+            p5pr(3 * k + 2) <= fa * p4c(k).b;
+            if cAlphaType = 3 then
+               p5pb(3 * k + 0) <= bm * cBlend.r; p5pb(3 * k + 1) <= bm * cBlend.g; p5pb(3 * k + 2) <= bm * cBlend.b;
+            else
+               p5pb(3 * k + 0) <= bm * to_integer(unsigned(bg(23 downto 16)));
+               p5pb(3 * k + 1) <= bm * to_integer(unsigned(bg(15 downto 8)));
+               p5pb(3 * k + 2) <= bm * to_integer(unsigned(bg(7 downto 0)));
+            end if;
+         end loop;
+         -- S5 -> S6: divide
+         p6v <= p5v; p6x <= p5x; p6a <= p5a;
+         for k in 0 to 1 loop
+            if (p5a(k) = 255) then
+               p6c(k) <= p5c(k);
+            else
+               p6c(k) <= (div255(p5pr(3 * k) + p5pb(3 * k)), div255(p5pr(3 * k + 1) + p5pb(3 * k + 1)),
+                          div255(p5pr(3 * k + 2) + p5pb(3 * k + 2)));
+            end if;
+         end loop;
+         -- S6: clamp, write
+         if (p6v = '1') then
+            for k in 0 to 1 loop
+               px := p6x + k;
+               if (p6a(k) /= 0 and px < SCREEN_W) then
+                  lbPut(px, clamp8(p6c(k).r) & clamp8(p6c(k).g) & clamp8(p6c(k).b));
+               end if;
+            end loop;
+         end if;
+         -- texel coordinates for the next fetch
+         muR <= maskedTrunc(u, cUmask);
+         mvR <= maskedTrunc(v, cVmask);
 
          ------------------------------------------------ row writer (second DDR3 client)
          fbw_request <= '0';
