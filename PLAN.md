@@ -266,8 +266,12 @@ Hardware bring-up (2026-11-06, mister192, Quartus 17.0 Lite on misterubuntu):
   PPP -> registration page -> typed name/username over the IR keyboard -> "All set" -> WebTV Emulator Home.
   (The solid magenta screen seen earlier was the OS's crash screen after "Watchpup fired".)
 
+Open (seen 2026-11-06): after registration + a few more key presses the box stopped taking input (CPU running,
+no new debug output, screen not updating after an alert "-65" from wtv-setup:/get). Suspect the IR
+receiver's interrupt handshake (waitRead / run FIFO) under real-time key bursts; add IR state to the overlay.
+
 Next:
-- Real Internet: run webtv-bridge tools/relay.mjs and start the line server with --relay.
+- Real Internet: relay.mjs + lineserver --relay are running on misterubuntu; not yet exercised (input hang).
 - Audio unit, OSD-reset reliability, analog video scanout.
 - CPU timing at 93.75 MHz (forwarding/stall paths) so the full-speed build can be used.
 - Quartus build (needs a machine with Quartus 17): fit/timing; expect work on the renderer's blend path and the

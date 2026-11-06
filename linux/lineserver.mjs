@@ -27,11 +27,14 @@ const ts = () => new Date().toISOString().slice(11, 23);
 const log = (...a) => console.log(ts(), ...a);
 const quiet = VERBOSE ? log : () => {};
 
+// one service for all calls: registrations and sessions persist between calls
+const service = new WebTVService({ log: quiet });
+
 net.createServer((sock) => {
   const who = `${sock.remoteAddress}:${sock.remotePort}`;
   log(`call from ${who}`);
   sock.setNoDelay(true);
-  const line = createNetworkLine({ relayUrl: RELAY, service: new WebTVService({ log: quiet }), hostMap: {}, log });
+  const line = createNetworkLine({ relayUrl: RELAY, service, hostMap: {}, log });
   let closed = false;
   const hang = (why) => {
     if (closed) return;
