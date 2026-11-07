@@ -58,12 +58,29 @@ class FileStore {
 }
 
 // one service for all calls: registrations and sessions persist between calls
-const service = new WebTVService({ store: new FileStore(STORE), log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
+const store = new FileStore(STORE);
+const service = new WebTVService({ store, log: quiet, fetchUrl: args.includes('--no-web') ? null : fetchUrl });
 
 // every request and its status line in the log (the service's own log is --verbose)
+// A box sometimes sends a bare path ("GET /relogin?" after a reconnect); as minisrv does, it names the
+// service on the port it came in on. Ports from webtv-bridge's src/wtvsrv/service.js SERVICES.
+const PORT_SERVICE = { 1601: 'wtv-head-waiter', 1602: 'wtv-tricks', 1603: 'wtv-star', 1607: 'wtv-register',
+  1608: 'wtv-mail', 1609: 'wtv-log', 1611: 'wtv-favorite', 1612: 'wtv-home', 1613: 'wtv-setup',
+  1615: 'wtv-1800', 1618: 'wtv-flashrom', 1619: 'wtv-cookie' };
+// Requests that don't carry the box's serial (a relogin after a reconnect) are taken as the last box
+// seen; remember it across restarts too, or the first such request after one gets "400 Please reconnect".
+service.lastSsid = await store.get('lastSsid');
 const handle = service.handle.bind(service);
 service.handle = async (req, conn) => {
-  const r = await handle(req, conn);
+  if (req.url.startsWith('/') && PORT_SERVICE[req.port]) req.url = `${PORT_SERVICE[req.port]}:${req.url}`;
+  // relogin needs no session (it sends the box to wtv-1800:/preregister, where it identifies itself):
+  // answer it even when no box is known yet, instead of "400 Please reconnect"
+  const known = req.headers['wtv-client-serial-number'] || conn.ssid || service.lastSsid;
+  const relogin = /^wtv-head-waiter:\/relogin(\?|$)/.test(req.url);
+  const r = (!known && relogin)
+    ? await service.routes['wtv-head-waiter:/relogin'].call(service, { query: Object.fromEntries(new URLSearchParams(req.url.split('?')[1] || '')) })
+    : await handle(req, conn);
+  if (service.lastSsid && service.lastSsid !== (await store.get('lastSsid'))) await store.set('lastSsid', service.lastSsid);
   log(`wtvp ${req.method} ${JSON.stringify(req.url)} -> ${String(r.head).split('\n')[0]}`);
   return r;
 };
