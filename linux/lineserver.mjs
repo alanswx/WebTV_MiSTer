@@ -88,6 +88,11 @@ service.handle = async (req, conn) => {
 net.createServer((sock) => {
   const who = `${sock.remoteAddress}:${sock.remotePort}`;
   log(`call from ${who}`);
+  // A new call is a new login: forget the previous call's key exchange, so a box that comes back
+  // straight to wtv-head-waiter:/login (without wtv-1800:/preregister, e.g. after losing its
+  // secret) is sent through preregister instead of getting a challenge it can't answer -- the OS
+  // asserts on that (Network::ProcessChallenge, "no secret").
+  for (const s of service.sessions.values()) s.login = null;
   sock.setNoDelay(true);
   const line = createNetworkLine({ relayUrl: RELAY, service, hostMap: {}, log });
   let closed = false;
