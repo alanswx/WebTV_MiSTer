@@ -1,6 +1,7 @@
 #!/bin/sh
 # Install the WebTV core and its modem service on a MiSTer over ssh.
 #   [RBF=path/to/WebTV.rbf] linux/install_mister.sh MISTER_HOST [LINESERVER_HOST:PORT]
+# Without LINESERVER_HOST:PORT the modem answers calls itself (connect=local, the built-in service).
 # Copies the core (output_files/WebTV.rbf -> _Computer/WebTV.rbf), the modem service
 # (/media/fat/linux/webtv/), and a webtv.cfg if there is none yet; adds the service to
 # /media/fat/linux/user-startup.sh (once); writes _Computer/WebTV.mgl if a disk image is in

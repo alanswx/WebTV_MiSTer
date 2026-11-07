@@ -1,36 +1,30 @@
 # Deploying the WebTV core and its network
 
-## Today: MiSTer + a LAN server
+## Everything on the MiSTer (the default)
 
 ```
- WebTV core ── 16550 UART ── /dev/ttyS1 ── webtv_modem.py ──TCP──▶ lineserver.mjs ──▶ WebTV service (built in)
-   (FPGA)                      (MiSTer Linux)                       (LAN machine, Node)   └▶ web pages (fetch) / relay
+ WebTV core ── 16550 UART ── /dev/ttyS1 ── webtv_modem.py ──▶ web pages (fetched by the MiSTer)
+   (FPGA)                      (MiSTer Linux: modem + PPP + IP/TCP gateway + WebTV service)
 ```
 
-* **MiSTer**: `webtv_modem.py` is the modem (AT commands, TellyScript's firmware download, DTR/DCD).
-  On a dial it opens a TCP connection to the line server and relays the PPP bytes. It runs as a
-  service (`webtv_modem.sh`), started at boot, that only opens the UART while the WebTV core is
-  loaded (`/tmp/CORENAME`), so it doesn't disturb other cores' serial use.
-* **LAN server**: `lineserver.mjs` answers each call with webtv-bridge's PPP server, user-space
-  TCP/IP gateway and WebTV service. It fetches the web pages the box asks the service for, and keeps
-  registrations in `~/.webtv-lineserver.json`. `start_net.sh` runs it (and webtv-bridge's relay)
-  under restart loops.
+`webtv_modem.py` is one Python file using only the standard library of the MiSTer's Python 3.9
+(there is no pip on a MiSTer, so nothing can be pulled in). It answers the box's call itself
+(`connect=local`): the modem, PPP, a user-space TCP/IP gateway, the WebTV service, and web fetching
+with page slimming, image conversion (via the MiSTer's own Imlib2) and built-in root certificates.
+See [README.md](README.md). It runs as a service (`webtv_modem.sh`), started at boot, that only opens
+the UART while the WebTV core is loaded (`/tmp/CORENAME`), so it doesn't disturb other cores.
+
+Optionally the modem relays calls to a line server on the LAN instead (`connect=HOST:PORT`):
+`webtv_modem.py --listen 2323` on any machine with Python 3, or the original Node `lineserver.mjs`.
 
 ### Install
 
-On the LAN server (any machine with Node 18+ and a webtv-bridge checkout):
-
-    linux/start_net.sh /path/to/webtv-bridge        # starts relay + line server, restarts them if they exit
-
-To start them at boot without root: `crontab -e` and add
-`@reboot /path/to/WebTV_MiSTer/linux/start_net.sh /path/to/webtv-bridge`. (A systemd unit works too.)
-
 On the MiSTer, from this repository:
 
-    RBF=path/to/WebTV.rbf linux/install_mister.sh MISTER_HOST LINESERVER_HOST:2323
+    RBF=path/to/WebTV.rbf linux/install_mister.sh MISTER_HOST
 
 This copies the core to `_Computer/WebTV.rbf`, the modem service to `/media/fat/linux/webtv/`
-(with `webtv.cfg`, which holds the line server's address), adds one line to
+(with `webtv.cfg`, its settings), adds one line to
 `/media/fat/linux/user-startup.sh` so the service starts at boot, writes `_Computer/WebTV.mgl` (core
 + the disk image in `games/WebTV`), and starts the service. Put the boot ROM in
 `games/WebTV/boot.rom` and a disk image in `games/WebTV/` yourself.
@@ -46,55 +40,25 @@ On the MiSTer: `/media/fat/linux/webtv/webtv_modem.sh status|restart|log`.
 | One bad request could kill the line server; a killed program stayed dead | Exception guards; restart loops on both sides |
 | The modem script had to be started by hand, and would hold `/dev/ttyS1` for other cores | Boot service that follows `/tmp/CORENAME` |
 | Unbounded debug log in `/tmp` (RAM) | `--logfile` keeps 4 MB + one old copy |
+| A LAN machine running Node was needed for the line and service | Ported to Python into `webtv_modem.py` (`connect=local`) |
+| Modern pages (megabytes of script) ran the box out of memory | Scripts, styles and unused attributes stripped; 384 KB cap after that |
+| HTTPS failed for sites with roots newer than the MiSTer's 2020 bundle | Mozilla's roots built into the script |
 
-## Next: everything on the MiSTer
+## Why Python, and not C or Node
 
-The goal is a MiSTer that needs nothing else on the LAN. What the MiSTer's Linux offers
-(checked on a current MiSTer image):
+What the MiSTer's Linux offers (checked on a current MiSTer image): ARMv7 (Cortex-A9, 2 cores), ~490 MB
+RAM, Python 3.9 with its full standard library (ssl/OpenSSL 1.1.1, hashlib, urllib, ctypes, zlib), no
+pip, no compiler, no Node; Imlib2, libjpeg-turbo, libpng and libgif are installed (the menu uses them);
+the kernel has `pppd` but no NAT.
 
-| | |
-|---|---|
-| CPU / RAM | ARMv7 (Cortex-A9), ~490 MB, ~400 MB available |
-| Python | 3.9, standard library only |
-| Node | none |
-| PPP | `pppd`, `/dev/ppp`, `CONFIG_PPP_ASYNC` |
-| NAT | **none** (`CONFIG_IP_NF_NAT` not set); `CONFIG_TUN=y` |
-| SD space | whatever the user has left (332 MB on the test card) |
+The missing NAT is why `pppd` alone isn't enough: a WebTV box first connects to WebTV's own addresses
+from its NVRAM and ROM (e.g. `207.79.34.4:1601`, `10.0.128.1:1615`), and every connection to a WTVP
+port has to reach the service whatever the address. So the user-space gateway moves too.
 
-The missing NAT matters: a WebTV box first connects to WebTV's own addresses from its NVRAM and ROM
-(e.g. `207.79.34.4:1601`, `10.0.128.1:1615`). webtv-bridge's gateway sends **every** connection to a
-WTVP port (1600-1699) to the service, whatever the address. With `pppd` and the kernel's TCP/IP that
-would need a NAT redirect, which this kernel can't do. So `pppd` alone isn't enough: the user-space
-gateway (PPP + IP/TCP + the service) has to move too. That is webtv-bridge's `src/net/ppp.js`
-(370 lines), `ip.js` (387), `line.js` (164) and `src/wtvsrv/` (~900, with its own DES, RC4 and MD5).
-
-### Option A: port to Python (fold into webtv_modem.py)
-
-* One file, no dependencies, the same daemon that already owns the UART: on a dial it answers the
-  call itself instead of opening a socket.
-* ~1,800 lines of JS to port; the user-space TCP needs care (windows, retransmit, MSS 536).
-  Web pages via `urllib`, DNS via `socket.getaddrinfo`.
-* Speed is not a concern: the line is ~57,600 bit/s.
-* A second copy of webtv-bridge's network and service logic to keep in step. Testable against
-  the JS one: the same PPP byte stream in, the same responses out.
-
-### Option B: port to C
-
-* Smallest and fastest; a static ARM binary, cross-compiled (MiSTer's own toolchain is
-  arm-linux-gnueabihf). Could later also take over the modem from Python.
-* The most work, and HTTP(S) fetching needs a TLS library (or a small helper).
-* webtv-bridge's `pico/` firmware (`modem.c`, `ppp.c`, `gw.c`, for the Raspberry Pi Pico bridge)
-  is C already and covers modem + PPP + gateway; the service would still need porting.
-
-### Option C: Node on the MiSTer
-
-* Copy an armv7l Node build (Node 22 needs glibc ≥ 2.28; MiSTer has 2.31) and webtv-bridge's
-  `src/` to the SD card and run `lineserver.mjs` locally against `127.0.0.1`. The modem stays as is.
-* No port, the exact tested code. Costs ~100 MB of SD space and ~50 MB of RAM while running.
-
-### Recommendation
-
-Get it solid with the LAN server first (now). Then **A** (Python): it removes the dependency
-without adding a runtime, keeps one daemon, and the line speed makes Python's speed irrelevant.
-**C** is the fallback if the port drags on; **B** only if Python turns out too slow or heavy, which
-is unlikely at 57,600 bit/s.
+* **Python** (done): one file, no dependencies, the daemon that already owns the UART. The line is
+  57,600 bit/s, so speed doesn't matter; DES and RC4 are small pure-Python functions, and image work
+  goes to Imlib2 (native) through ctypes.
+* **C** would be a static binary needing nothing, but there's no compiler on the MiSTer (every change
+  means cross-compiling) and HTTPS means linking OpenSSL. The Python file is a clean spec to port from
+  if it's ever needed.
+* **Node** would run the original code unchanged, at ~100 MB of SD space and an unusual runtime.
