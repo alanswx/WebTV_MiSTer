@@ -107,7 +107,13 @@ service.lastSsid = await store.get('lastSsid');
 const home = service.routes['wtv-home:/home'];
 service.routes['wtv-home:/home'] = async function (ctx) {
   const r = await home.call(this, ctx);
-  if (typeof r.body === 'string') r.body = r.body.replace('action="client:goto"', 'action="wtv-home:/go"');
+  if (typeof r.body === 'string') {
+    r.body = r.body.replace('action="client:goto"', 'action="wtv-home:/go"');
+    // extra links after 68k.news
+    const row = (url, name, what) => `\n<tr><td><a href="${url}">${name}</a><td><font size=-1 color="#8f8f8f">${what}</font>`;
+    r.body = r.body.replace(/(<tr><td><a href="http:\/\/68k\.news\/">[^\n]*)/,
+      `$1${row('http://theoldnet.com/', 'TheOldNet', 'the web as it was, from the Wayback Machine')}`);
+  }
   return r;
 };
 service.routes['wtv-home:/go'] = async function ({ query }) {
