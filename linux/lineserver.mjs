@@ -7,6 +7,7 @@
 //
 //   node linux/lineserver.mjs [--port 2323] [--bridge PATH_TO_webtv-bridge] [--relay ws://host:8081]
 //                             [--store FILE (default ~/.webtv-lineserver.json)] [--no-web]
+//                             [--max-page BYTES (default 393216)]
 //
 // Web pages the box asks the service for (http/https) are fetched by this host (--no-web to disable).
 // Without --relay the line answers with the built-in service only (registration / home pages).
@@ -23,6 +24,7 @@ const BR = opt('bridge', join(HERE, '../ext/webtv-bridge'));
 const PORT = Number(opt('port', '2323'));
 const RELAY = opt('relay', null);
 const VERBOSE = args.includes('--verbose');
+const MAX_PAGE = Number(opt('max-page', String(384 * 1024)));
 const STORE = opt('store', join(homedir(), '.webtv-lineserver.json'));
 
 const { createNetworkLine } = await import(join(BR, 'src/net/line.js'));
@@ -32,14 +34,43 @@ const ts = () => new Date().toISOString().slice(11, 23);
 const log = (...a) => console.log(ts(), ...a);
 const quiet = VERBOSE ? log : () => {};
 
+// The box's browser is Latin-1: a UTF-8 page shows "Â " for every no-break space. Decode text as
+// UTF-8 when it says so (or is valid UTF-8), map common punctuation to ASCII, and send Latin-1.
+const ASCII = { '\u2018': "'", '\u2019': "'", '\u201a': "'", '\u201c': '"', '\u201d': '"', '\u201e': '"',
+  '\u2013': '-', '\u2014': '--', '\u2026': '...', '\u2022': '*', '\u2122': '(TM)', '\u00a0': '\u00a0' };
+function toLatin1(bytes, type) {
+  const declared = (/charset=([\w-]+)/i.exec(type) || [])[1];
+  let text;
+  if (declared && !/utf-?8/i.test(declared)) return bytes;
+  try { text = new TextDecoder('utf-8', { fatal: !declared }).decode(bytes); } catch { return bytes; }
+  text = text.replace(/<meta[^>]+charset=[^>]*>/gi, '');
+  const out = new Uint8Array(text.length * 5);
+  let n = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    if (c < 256) { out[n++] = c; continue; }
+    for (const a of (ASCII[ch] ?? '?')) out[n++] = a.charCodeAt(0);
+  }
+  return out.subarray(0, n);
+}
+
 // web pages (http/https proxied by the service): fetched by this host, unless --no-web
 async function fetchUrl(url, { method = 'GET', headers = {}, body } = {}) {
   const h = { 'User-Agent': 'Mozilla/4.0 WebTV/2.8 (compatible; MSIE 4.0)' };
   if (headers['Content-Type']) h['Content-Type'] = headers['Content-Type'];
   const r = await fetch(url, { method, headers: h, body, redirect: 'follow', signal: AbortSignal.timeout(20000) });
-  const out = new Uint8Array(await r.arrayBuffer());
+  let out = new Uint8Array(await r.arrayBuffer());
+  const type = r.headers.get('content-type') || 'text/html';
+  if (/^text\//i.test(type)) out = toLatin1(out, type);
   log(`web ${method} ${url} -> ${r.status} (${out.length} bytes)`);
-  return { status: `${r.status} ${r.statusText || 'OK'}`, headers: { 'content-type': r.headers.get('content-type') || 'text/html' }, body: out };
+  // an 8 MB box can't take a modern multi-megabyte page (it fails with an out-of-memory alert)
+  if (out.length > MAX_PAGE) {
+    const msg = `<html><head><title>Page too large</title></head><body><h2>Page too large</h2>` +
+      `<p>${url.replace(/[<&"]/g, '')} is ${Math.round(out.length / 1024)} KB; this box can show pages up to ` +
+      `${Math.round(MAX_PAGE / 1024)} KB. Try FrogFind or 68k.news for lighter versions of sites.</p></body></html>`;
+    return { status: '200 OK', headers: { 'content-type': 'text/html' }, body: new TextEncoder().encode(msg) };
+  }
+  return { status: `${r.status} ${r.statusText || 'OK'}`, headers: { 'content-type': type.replace(/;.*$/, '') }, body: out };
 }
 
 // accounts (registrations) kept in a JSON file, so restarting the server doesn't make the box
@@ -70,6 +101,22 @@ const PORT_SERVICE = { 1601: 'wtv-head-waiter', 1602: 'wtv-tricks', 1603: 'wtv-s
 // Requests that don't carry the box's serial (a relogin after a reconnect) are taken as the last box
 // seen; remember it across restarts too, or the first such request after one gets "400 Please reconnect".
 service.lastSsid = await store.get('lastSsid');
+// The home page's "Go to page" form posts to client:goto, which this OS build ignores
+// ("ExecuteClientFunction: ignoring client:goto"); point it at wtv-home:/go, which sends the box
+// to the URL with wtv-visit.
+const home = service.routes['wtv-home:/home'];
+service.routes['wtv-home:/home'] = async function (ctx) {
+  const r = await home.call(this, ctx);
+  if (typeof r.body === 'string') r.body = r.body.replace('action="client:goto"', 'action="wtv-home:/go"');
+  return r;
+};
+service.routes['wtv-home:/go'] = async function ({ query }) {
+  let url = String(query.url || '').trim();
+  if (!url || url === 'http://') return { head: '200 OK\nwtv-visit: wtv-home:/home\nContent-Type: text/html', body: '' };
+  if (!/^[\w-]+:/.test(url)) url = 'http://' + url;
+  if (/^https?:\/\/[^/?#]+$/i.test(url)) url += '/';   // the box fetches "host/"; visit the same URL
+  return { head: `302 Moved\nLocation: ${url.replace(/[\r\n]/g, '')}\nContent-Type: text/html`, body: '' };
+};
 const handle = service.handle.bind(service);
 service.handle = async (req, conn) => {
   if (req.url.startsWith('/') && PORT_SERVICE[req.port]) req.url = `${PORT_SERVICE[req.port]}:${req.url}`;

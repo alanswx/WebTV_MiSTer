@@ -266,17 +266,16 @@ Hardware bring-up (2026-11-06, mister192, Quartus 17.0 Lite on misterubuntu):
   PPP -> registration page -> typed name/username over the IR keyboard -> "All set" -> WebTV Emulator Home.
   (The solid magenta screen seen earlier was the OS's crash screen after "Watchpup fired".)
 
-Open: the "hang" (2026-11-06, investigated). Not the IR receiver. The main task (UserTaskMain) is cut off in the
-middle of whatever it is doing -- a printf stops mid-line ("TellyS", "...goto?url=http%3A%2F%2F68k.ne") and the
-operation it was part of is never finished (no preregister after relogin; no HTTP request after Go to page) --
-while the task itself keeps running its main loop (PC samples: blits, Cache::SortForPending). It looks like the
-task resumes from an OLDER saved context after a preemption: SwapTasks stores the interrupted EPC/registers
-into the task struct (k0 = task + 0x24, EPC at +0xA0); if those stores are lost, the next resume is from the
-previous save. Seen around network activity (modem UART interrupts -> ppp tasks preempt the main task).
-Ruled out: printf semaphore (free), gCharIOSelect (0x08), debug-port flow control (TFFCNT 0), write FIFO overflow
-(never full), nested exceptions (JS: 0 of 3946; EPC is now kept with EXL set anyway, as in the JS model).
-Tools: linux/pcsample.py (1 ms PC samples named with the OS symbols from RAM); RAM dumps via /dev/mem; the
-symbol table at 0x80708590; OSD "Data cache" / "Instruction cache" Off switches to A/B the caches.
+Resolved: the "hang" (2026-11-06) was not the CPU. What looked like a stuck box was the OS waiting on things the
+service never gave it: (1) "GET /relogin?" (bare path) answered 404; (2) a box without a secret sent straight to a
+challenge -> assert in Network::ProcessChallenge; (3) the home page's "Go to page" form used client:goto, which this
+OS build ignores ("ExecuteClientFunction: ignoring client:goto"), so no request was ever made. The "truncated"
+printf ("...68k.ne") is the OS's own fixed-width log line, and Cache::SortForPending is the idle loop. All three are
+fixed in linux/lineserver.mjs (bare paths by port; login state reset per call; the form posts to wtv-home:/go,
+which answers 302 + Location). Real web pages now load (68k.news), UTF-8 pages are sent as Latin-1, and pages over
+384 KB get a "too large" page (an 8 MB box runs out of memory on multi-MB pages).
+Tools that came out of it: linux/pcsample.py (1 ms PC samples named with the OS symbols from RAM); RAM dumps via
+/dev/mem; the symbol table at 0x80708590; OSD "Data cache" / "Instruction cache" Off switches.
 Corrupt NV: a hung session can save a corrupt TellyScript record into the disk image's NV (LBA 1-17 and
 33796-33812), after which every dial fails with "Corrupt record" + Breakpoint; restore those sectors.
 

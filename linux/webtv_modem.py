@@ -40,12 +40,25 @@ class Output:
             sys.stdout.write(text)
             sys.stdout.flush()
             return
-        self.f.write(text)
-        self.f.flush()
-        if self.f.tell() > self.limit:
-            self.f.close()
-            os.replace(self.path, self.path + '.1')
-            self.f = open(self.path, 'a', encoding='latin-1')
+        try:
+            # the file may have been moved, deleted or truncated under us: follow the path
+            st_fd = os.fstat(self.f.fileno())
+            try:
+                st_path = os.stat(self.path)
+                moved = (st_path.st_ino, st_path.st_dev) != (st_fd.st_ino, st_fd.st_dev)
+            except FileNotFoundError:
+                moved = True
+            if moved:
+                self.f.close()
+                self.f = open(self.path, 'a', encoding='latin-1')
+            self.f.write(text)
+            self.f.flush()
+            if os.fstat(self.f.fileno()).st_size > self.limit:
+                self.f.close()
+                os.replace(self.path, self.path + '.1')
+                self.f = open(self.path, 'a', encoding='latin-1')
+        except OSError:
+            pass
 
 
 OUT = Output()
@@ -361,6 +374,7 @@ class DebugLog:
         fd = os.open('/dev/mem', os.O_RDONLY | os.O_SYNC)
         self.ring = mmap.mmap(fd, 0x10000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x30FB0000)
         self.cnt = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ, offset=0x30FC0000)
+        os.close(fd)                       # the mappings stay valid
         self.seen = self.count()
 
     def count(self):
