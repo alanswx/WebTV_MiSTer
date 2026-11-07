@@ -41,8 +41,9 @@ the WebTV function keys are:
 | F4 | Mail | | | |
 | F5 | Find on page | | | |
 
-F12 opens the MiSTer menu, so the WebTV "View" key (also on F12) is not reachable. In a text field,
-Enter moves to the next control (e.g. the "Go to page" button); press it again to activate that.
+F12 opens the MiSTer menu, so the WebTV "View" key (also on F12) is not reachable. On the home
+page, type an address and press Enter once: that goes to the page (a second Enter would click the
+first link on it).
 
 Joystick: d-pad moves; buttons are Select, Back, Home, Options, Scroll Up, Scroll Down and Power.
 
