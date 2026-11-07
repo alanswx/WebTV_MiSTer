@@ -67,9 +67,8 @@ localparam CONF_STR = {
 	"O[4],Data cache,On,Off;",
 	"O[5],Instruction cache,On,Off;",
 	"-;",
-	"J1,Select,Back,Home,Options,Scroll Up,Scroll Down,Power;",
-	"-;",
 	"R[0],Reset;",
+	"J1,Select,Back,Home,Options,Scroll Up,Scroll Down,Power;",
 	"v,0;",
 	"V,v",`BUILD_DATE
 };
