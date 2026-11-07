@@ -86,6 +86,10 @@ entity webtv_mister is
       vid_ce           : out std_logic;
       -- bring-up overlay on the core's own video (rows of bit boxes, see the overlay process)
       debug_overlay    : in  std_logic := '0';
+      -- OSD: run with the CPU's data / instruction cache off (sampled while the CPU is held, so a
+      -- change takes effect at the next reset)
+      dcache_off       : in  std_logic := '0';
+      icache_off       : in  std_logic := '0';
       vga_r, vga_g, vga_b : out std_logic_vector(7 downto 0);
       vid_hblank, vid_vblank, vid_hsync, vid_vsync : out std_logic;
 
@@ -126,7 +130,8 @@ architecture arch of webtv_mister is
    signal diskWait    : integer range 0 to DISK_WAIT_MS * (CLK1X_HZ / 1000) := 0;
    signal hold1x      : std_logic := '1';
    signal reset_1x    : std_logic := '1';
-   signal coldReset   : std_logic := '0';   -- RAM clear = a power-on or OSD reset (not the OS's own reset)
+   signal coldReset   : std_logic := '0';
+   signal dcOn, icOn  : std_logic := '1';   -- RAM clear = a power-on or OSD reset (not the OS's own reset)
    signal romLoaded   : std_logic := '0';
    signal dl_1        : std_logic := '0';
 
@@ -179,6 +184,13 @@ architecture arch of webtv_mister is
    signal logWr, logRd : unsigned(7 downto 0) := (others => '0');
    signal logCount    : unsigned(31 downto 0) := (others => '0');
    signal logPh       : std_logic := '0';
+   -- PC sampler: every 1 ms the retiring PC goes to a 1024-entry DDR3 ring at 0xFA4000, each entry
+   -- {sample number, PC} (64-bit, big word first); Linux (linux/pcsample.py) names them with the
+   -- OS's symbols to see where a hung box is spinning
+   signal smpTick     : integer range 0 to CLK1X_HZ / 1000 := 0;
+   signal smpPend     : std_logic := '0';
+   signal smpSeq      : unsigned(31 downto 0) := (others => '0');
+   signal smpPc       : unsigned(31 downto 0) := (others => '0');
    signal logByte     : std_logic_vector(7 downto 0) := (others => '0');
    signal hpsMask     : std_logic_vector(7 downto 0) := x"FF";
    signal ledI        : std_logic_vector(31 downto 0);
@@ -537,10 +549,26 @@ begin
                hpsReq   <= '1';
                hpsBusy  <= '1';
                logPh    <= '0';
+            elsif (smpPend = '1') then
+               hpsAddr  <= x"0FA4000" + resize(smpSeq(9 downto 0) & "000", 28);
+               hpsData  <= std_logic_vector(smpSeq) & std_logic_vector(smpPc);
+               hpsMask  <= x"FF";
+               hpsReq   <= '1';
+               hpsBusy  <= '1';
+               smpPend  <= '0';
+               smpSeq   <= smpSeq + 1;
             end if;
          end if;
+         -- PC sampler tick (pcI crosses from the CPU clock unsynchronised: a sample can be torn,
+         -- which is fine for a profile)
+         if (smpTick = CLK1X_HZ / 1000 - 1) then
+            smpTick <= 0;
+            if (boot = RUN and smpPend = '0') then smpPend <= '1'; smpPc <= pcI; end if;
+         else
+            smpTick <= smpTick + 1;
+         end if;
          if (boot /= RUN and boot /= HOLD) then
-            if (boot = CLEAR) then logCount <= (others => '0'); logPh <= '0'; end if;
+            if (boot = CLEAR) then logCount <= (others => '0'); logPh <= '0'; smpSeq <= (others => '0'); end if;
          end if;
 
          -- branch trace dump (the HPS client is idle while running). trWi is the CPU clock's: it is
@@ -590,6 +618,7 @@ begin
          if (boot /= bootLast) then report "boot state " & tBoot'image(boot); end if;
          -- synthesis translate_on
          reset_1x <= hold1x;
+         if (hold1x = '1') then dcOn <= not dcache_off; icOn <= not icache_off; end if;
       end if;
    end process;
 
@@ -622,7 +651,7 @@ begin
    generic map (CLK93_HZ => CLK93_HZ, CLK1X_HZ => CLK1X_HZ)
    port map (
       clk1x => clk1x, clk93 => clk93, clk2x => clk2x,
-      reset_1x => reset_1x, reset_93 => reset_93, reset_mem => memReset, cold_reset => coldReset,
+      reset_1x => reset_1x, reset_93 => reset_93, reset_mem => memReset, cold_reset => coldReset, dcache_on => dcOn, icache_on => icOn,
       irqRequest => '0', IRQ_EXTERNAL => '0', solo_irq => open,
       serial_id => serial_id, soft_reset => soft_reset, led => ledI,
       dbg_tx => dbg_tx, dbg_tx_data => dbg_tx_data, dbg_rx => dbg_rx, dbg_rx_data => dbg_rx_data,

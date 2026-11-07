@@ -266,9 +266,19 @@ Hardware bring-up (2026-11-06, mister192, Quartus 17.0 Lite on misterubuntu):
   PPP -> registration page -> typed name/username over the IR keyboard -> "All set" -> WebTV Emulator Home.
   (The solid magenta screen seen earlier was the OS's crash screen after "Watchpup fired".)
 
-Open (seen 2026-11-06): after registration + a few more key presses the box stopped taking input (CPU running,
-no new debug output, screen not updating after an alert "-65" from wtv-setup:/get). Suspect the IR
-receiver's interrupt handshake (waitRead / run FIFO) under real-time key bursts; add IR state to the overlay.
+Open: the "hang" (2026-11-06, investigated). Not the IR receiver. The main task (UserTaskMain) is cut off in the
+middle of whatever it is doing -- a printf stops mid-line ("TellyS", "...goto?url=http%3A%2F%2F68k.ne") and the
+operation it was part of is never finished (no preregister after relogin; no HTTP request after Go to page) --
+while the task itself keeps running its main loop (PC samples: blits, Cache::SortForPending). It looks like the
+task resumes from an OLDER saved context after a preemption: SwapTasks stores the interrupted EPC/registers
+into the task struct (k0 = task + 0x24, EPC at +0xA0); if those stores are lost, the next resume is from the
+previous save. Seen around network activity (modem UART interrupts -> ppp tasks preempt the main task).
+Ruled out: printf semaphore (free), gCharIOSelect (0x08), debug-port flow control (TFFCNT 0), write FIFO overflow
+(never full), nested exceptions (JS: 0 of 3946; EPC is now kept with EXL set anyway, as in the JS model).
+Tools: linux/pcsample.py (1 ms PC samples named with the OS symbols from RAM); RAM dumps via /dev/mem; the
+symbol table at 0x80708590; OSD "Data cache" / "Instruction cache" Off switches to A/B the caches.
+Corrupt NV: a hung session can save a corrupt TellyScript record into the disk image's NV (LBA 1-17 and
+33796-33812), after which every dial fails with "Corrupt record" + Breakpoint; restore those sectors.
 
 Robustness + CPU (2026-11-06, later):
 - Purple screens after power-off: the box drops DTR on hangup/power-off/reboot; the modem now hangs up on it

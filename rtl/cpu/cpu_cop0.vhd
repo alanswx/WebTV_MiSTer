@@ -137,6 +137,7 @@ architecture arch of cpu_cop0 is
    signal COP0_11_COMPARE                 : unsigned(31 downto 0) := (others => '0');  
    signal COP0_12_SR_interruptEnable      : std_logic := '0';
    signal COP0_12_SR_exceptionLevel       : std_logic := '0';
+   signal excNested                       : std_logic := '0';   -- WebTV: EXL was already set when the exception was taken
    signal COP0_12_SR_errorLevel           : std_logic := '0';
    signal COP0_12_SR_privilegeMode        : unsigned(1 downto 0)  := (others => '0');
    signal COP0_12_SR_userExtendedAddr     : std_logic := '0';
@@ -692,8 +693,13 @@ begin
             -- CPU access
             if (exception = '1') then
          
-               COP0_14_EPC               <= nextEPC_1;
-               COP0_13_CAUSE_branchDelay <= isDelaySlot_1;
+               -- WebTV: an exception taken with EXL already set keeps EPC and Cause.BD (R4000 manual;
+               -- the JS model does the same). Overwriting them sent the outer handler's eret to the
+               -- inner exception's PC.
+               if (excNested = '0') then
+                  COP0_14_EPC               <= nextEPC_1;
+                  COP0_13_CAUSE_branchDelay <= isDelaySlot_1;
+               end if;
                
                case (COP0_13_CAUSE_exceptionCode(3 downto 0)) is
                   when x"4" | x"5" | x"9" | x"A" | x"C"  => error_exception <= '1';
@@ -860,6 +866,7 @@ begin
                   if (decode_irq = '1' or exceptionFPU = '1' or exception3 = '1' or TLB_ExcDataRead = '1' or TLB_ExcDataWrite = '1' or TLB_ExcDataDirty = '1') then
                   
                      exception <= '1';
+                     excNested <= COP0_12_SR_exceptionLevel;
                      COP0_12_SR_exceptionLevel   <= '1';
                      COP0_13_CAUSE_coprocessorError <= "00";
                      if (decode_irq = '1') then

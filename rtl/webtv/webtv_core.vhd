@@ -40,6 +40,8 @@ entity webtv_core is
       reset_93         : in  std_logic;
       reset_mem        : in  std_logic := '0';  -- DDR3 mux only: stays out of reset while the CPU is held, so the HPS can load
       cold_reset       : in  std_logic := '0';  -- power-on / OSD reset: SOLO units back to their power-up state
+      dcache_on        : in  std_logic := '1';  -- CPU caches (quasi-static: change only while the CPU is held)
+      icache_on        : in  std_logic := '1';
 
       -- CPU interrupt: from the SOLO, or (IRQ_EXTERNAL = '1', lock-step testbench) from irqRequest
       irqRequest       : in  std_logic := '0';
@@ -246,7 +248,7 @@ begin
       clk1x => clk1x, clk93 => clk93, clk2x => clk2x,
       ce_1x => '1', ce_93 => '1',
       reset_1x => reset_1x, reset_93 => reset_93, preNMI => '0',
-      INSTRCACHEON => '1', DATACACHEON => '1', DATACACHESLOW => "0000",
+      INSTRCACHEON => icache_on, DATACACHEON => dcache_on, DATACACHESLOW => "0000",
       DATACACHEFORCEWEB => '0', DATACACHETLBON => '0', RANDOMMISS => "0000",
       DISABLE_BOOTCOUNT => '0', DISABLE_DTLBMINI => '0',
       irqRequest => cpuIrq,
