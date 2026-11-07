@@ -47,6 +47,7 @@ entity webtv_solo_vid is
       handles         : out std_logic;                     -- from bus_addr and req_read (not bus_read: no loop)
       req_read        : in  std_logic;                     -- a read is being requested (before routing)
 
+      cold_reset      : in  std_logic := '0';               -- power-on / OSD reset: registers to power-up values
       sum_level       : out std_logic_vector(7 downto 0);  -- BUS_VIDINTSTAT value
       sum_load        : out std_logic := '0';
       en_set          : out std_logic_vector(7 downto 0) := (others => '0');
@@ -366,8 +367,27 @@ begin
             sum_load <= '1';
          end if;
 
-         if (reset = '1') then
-            null;   -- video state survives a CPU reset; the JS model resets it with the machine
+         -- Video state survives the OS's own (software) reset. A power-on / OSD reset puts it back to
+         -- power-up values, as the JS model resets it with the machine: otherwise the interrupt enables
+         -- and pending status of the last session (e.g. the potUnit HSYNC/VSYNC interrupts) survive,
+         -- and the ROM OS, which expects them off, takes an interrupt it never clears ("whoa! looping
+         -- madly in SecondaryDispatch"). (The divUnit/dveUnit register tables are data, not interrupt
+         -- state, and stay as they are.)
+         if (cold_reset = '1') then
+            vNstart <= x"80000000";
+            vNsize <= (others => '0'); vDmacntl <= (others => '0'); vCstart <= (others => '0');
+            vCsize <= (others => '0'); vCcnt <= (others => '0'); vVdata <= (others => '0');
+            vInten <= (others => '0'); vIntstat <= (others => '0');
+            gRegs <= (5 => x"80000000", 6 => x"80000000", 7 => x"80000000", 8 => x"80000000", others => (others => '0'));
+            gInten <= (others => '0'); gIntstat <= (others => '0'); gWbdStart <= (others => '0');
+            gWbdLsize <= (others => '0'); gWbStride <= (others => '0'); gWbdConfig <= (others => '0');
+            dInten <= (others => '0'); dIntstat <= (others => '0'); dGpioMask <= (others => '0'); dGpioOut <= (others => '0');
+            pVstart <= std_logic_vector(to_unsigned(30, 32));
+            pVsize  <= std_logic_vector(to_unsigned(420, 32));
+            pBlank  <= x"00108080";
+            pHstart <= std_logic_vector(to_unsigned(16#77# + 40, 32));
+            pHsize  <= std_logic_vector(to_unsigned(560, 32));
+            pCntl <= (others => '0'); pHintline <= (others => '0'); pInten <= (others => '0'); pIntstat <= (others => '0');
          end if;
 
       end if;

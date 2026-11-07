@@ -301,5 +301,7 @@ Next:
 - Linux side of the modem: AT commands + PPP + gateway on the HPS (webtv-bridge pico/src modem.c/ppp.c/gw.c or
   src/machine/modem.js + src/net), talking to the core's UART.
 - Audio unit (DMA + sample output), parallel port, analog video scanout.
-- SOLO/video unit reset on a software reset (JS doReset resets them; the RTL keeps their state).
+- SOLO/video unit reset on a software reset (JS doReset resets them; the RTL keeps their state). A power-on / OSD
+  reset now does reset the video unit (an OSD reset mid-session used to leave its interrupt enables on, and the ROM
+  OS crashed with "looping madly in SecondaryDispatch").
 - Base/bound for user mode and CAlg cacheability (unused by the OS so far).

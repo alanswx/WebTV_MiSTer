@@ -29,6 +29,39 @@ const STORE = opt('store', join(homedir(), '.webtv-lineserver.json'));
 
 const { createNetworkLine } = await import(join(BR, 'src/net/line.js'));
 const { WebTVService } = await import(join(BR, 'src/wtvsrv/service.js'));
+const { IpGateway } = await import(join(BR, 'src/net/ip.js'));
+
+// The box drops a connection it no longer wants without a reset ("tcpHandler : Discarding packet,
+// no matching port"); webtv-bridge's gateway then retransmits to it forever, and on a 57.6 kbit/s
+// line those dead streams starve the live ones (a page took 33 s). Give up on a connection after
+// MAX_RTX retransmits in a row with no progress. TcpConn isn't exported: patch its prototype
+// through the first connection the gateway makes.
+const MAX_RTX = 6;
+let tcpPatched = false;
+const tcpInput = IpGateway.prototype.tcpInput;
+IpGateway.prototype.tcpInput = function (...a) {
+  const r = tcpInput.apply(this, a);
+  if (!tcpPatched) for (const c of this.tcp.values()) { patchTcp(Object.getPrototypeOf(c)); break; }
+  return r;
+};
+function patchTcp(P) {
+  tcpPatched = true;
+  const rto = P.rto, input = P.input;
+  P.rto = function () {
+    const queued = this.gw.o.backlog && this.gw.o.backlog() > 0;
+    if (this.state !== 'closed' && this.state !== 'syn-rcvd' && !queued && this.inFlight > 0) {
+      this.rtx = (this.rtx || 0) + 1;
+      if (this.rtx > MAX_RTX) { this.log(`[tcp] ${this.key}: no answer after ${MAX_RTX} retransmits, resetting`); this.reset(); return; }
+    }
+    return rto.call(this);
+  };
+  P.input = function (seg) {
+    const una = this.sndUna;
+    const r = input.call(this, seg);
+    if (this.sndUna !== una) this.rtx = 0;
+    return r;
+  };
+}
 
 const ts = () => new Date().toISOString().slice(11, 23);
 const log = (...a) => console.log(ts(), ...a);

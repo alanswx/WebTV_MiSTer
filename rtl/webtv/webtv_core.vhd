@@ -453,7 +453,7 @@ begin
 
    ivid : entity work.webtv_solo_vid
    port map (
-      clk1x => clk1x, reset => reset_1x, pix_ce => pixCe, TIMING_EXTERNAL => LOCKSTEP_COUNT,
+      clk1x => clk1x, reset => reset_1x, cold_reset => cold_reset, pix_ce => pixCe, TIMING_EXTERNAL => LOCKSTEP_COUNT,
       bus_addr => m_addr(15 downto 0), bus_read => v_read, bus_write => v_write, bus_be => m_be,
       bus_dataWrite => m_dataWrite, bus_dataRead => v_dataRead, bus_done => v_done, handles => v_handles, req_read => m_read,
       sum_level => vidSum, sum_load => vidLoad, en_set => vidEnSet, vid_cleared => vidCleared(0) or vidCleared(1) or vidCleared(2) or vidCleared(3) or vidCleared(4) or vidCleared(5) or vidCleared(6) or vidCleared(7),

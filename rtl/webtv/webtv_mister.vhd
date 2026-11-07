@@ -568,7 +568,10 @@ begin
             smpTick <= smpTick + 1;
          end if;
          if (boot /= RUN and boot /= HOLD) then
-            if (boot = CLEAR) then logCount <= (others => '0'); logPh <= '0'; smpSeq <= (others => '0'); end if;
+            if (boot = CLEAR) then
+               logCount <= (others => '0'); logPh <= '0'; smpSeq <= (others => '0');
+               logRd <= logWr;   -- drop the last session's unsent bytes
+            end if;
          end if;
 
          -- branch trace dump (the HPS client is idle while running). trWi is the CPU clock's: it is
