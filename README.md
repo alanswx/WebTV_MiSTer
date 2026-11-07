@@ -22,5 +22,30 @@ verification results and next steps.
 Put the boot ROM in `games/WebTV/boot.rom` (or load it from the OSD) and mount a raw WebTV disk image
 with "Mount Disk". No ROM or disk images are included.
 
-Keyboard: a PS/2/USB keyboard acts as the WebTV IR keyboard (F1 = power). Joystick: arrows, select,
-back, home, options, scroll up/down, power.
+### Controls
+
+A USB/PS/2 keyboard acts as the WebTV IR keyboard. Letters, digits and punctuation type as usual;
+the WebTV function keys are:
+
+| Key | WebTV | | Key | WebTV |
+|---|---|---|---|---|
+| F1 | Power | | F6 | Info |
+| End (numpad 1) | Back | | F7 | Go to (type a URL) |
+| Home (numpad 7) | Home | | F8 | Send |
+| Enter | Select / Go | | F9 | Save |
+| Arrows | Move between links and fields | | F10 | Recent |
+| Tab | Next field | | F11 | Options |
+| Page Up / Page Down | Scroll up / down | | Insert (numpad 0) | Edit |
+| F2 | Favorites | | Left Ctrl | Cmd (Cmd + letter shortcuts) |
+| F3 | Search | | | |
+| F4 | Mail | | | |
+| F5 | Find on page | | | |
+
+F12 opens the MiSTer menu, so the WebTV "View" key (also on F12) is not reachable. In a text field,
+Enter moves to the next control (e.g. the "Go to page" button); press it again to activate that.
+
+Joystick: d-pad moves; buttons are Select, Back, Home, Options, Scroll Up, Scroll Down and Power.
+
+The screen is black while the box is on standby: press Power (F1). A solid purple/magenta screen is
+the WebTV OS's crash screen. To go online, see [linux/README.md](linux/README.md) and
+[linux/DEPLOY.md](linux/DEPLOY.md).
